@@ -6,6 +6,64 @@
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
+const rolePriority = {
+  viewer: 0,
+  participant: 1,
+  moderator: 2,
+  owner: 3,
+};
+
+const toId = (value) => value?.toString?.() || value;
+
+const toPlainParticipant = (participant) => {
+  if (!participant) return null;
+
+  if (typeof participant.toObject === 'function') {
+    return participant.toObject({ depopulate: true, getters: false, virtuals: false });
+  }
+
+  return { ...participant };
+};
+
+const pickMoreRecentDate = (left, right) => {
+  const leftTime = left ? new Date(left).getTime() : 0;
+  const rightTime = right ? new Date(right).getTime() : 0;
+  return rightTime > leftTime ? right : left;
+};
+
+const normalizeParticipantList = (participants = []) => {
+  const map = new Map();
+
+  participants.forEach((participant) => {
+    const plainParticipant = toPlainParticipant(participant);
+    if (!plainParticipant) return;
+
+    const userId = toId(plainParticipant.user);
+    if (!userId) return;
+
+    const existing = map.get(userId);
+    if (!existing) {
+      map.set(userId, { ...plainParticipant, user: plainParticipant.user });
+      return;
+    }
+
+    const currentRole = existing.role || 'viewer';
+    const incomingRole = plainParticipant.role || 'viewer';
+    const mergedRole = rolePriority[incomingRole] > rolePriority[currentRole] ? incomingRole : currentRole;
+
+    map.set(userId, {
+      ...existing,
+      ...plainParticipant,
+      user: existing.user || participant.user,
+      role: mergedRole,
+      joinedAt: pickMoreRecentDate(existing.joinedAt, plainParticipant.joinedAt),
+      lastSeenAt: pickMoreRecentDate(existing.lastSeenAt, plainParticipant.lastSeenAt),
+    });
+  });
+
+  return Array.from(map.values());
+};
+
 const roomSchema = new mongoose.Schema({
   roomId: {
     type: String,
@@ -59,9 +117,12 @@ const roomSchema = new mongoose.Schema({
     },
     role: {
       type: String,
-      enum: ['participant', 'spectator'],
-      default: 'participant'
+      enum: ['owner', 'moderator', 'participant', 'viewer'],
+      default: 'viewer'
     },
+    isOnline: { type: Boolean, default: false },
+    socketId: { type: String, default: null },
+    lastSeenAt: { type: Date, default: null },
     isMuted: {
       type: Boolean,
       default: false
@@ -146,17 +207,48 @@ roomSchema.index({ 'participants.user': 1 });
 
 // Method to add participant
 roomSchema.methods.addParticipant = function(userId, role = 'participant') {
-  const existingParticipant = this.participants.find(
-    p => p.user.toString() === userId.toString()
-  );
+  this.participants = normalizeParticipantList(this.participants);
+  const normalizedUserId = userId.toString();
+  const existingParticipant = this.participants.find((participant) => participant.user.toString() === normalizedUserId);
   
   if (!existingParticipant) {
     this.participants.push({ user: userId, role });
     if (this.participants.length > this.stats.peakParticipants) {
       this.stats.peakParticipants = this.participants.length;
     }
+  } else if (role && role !== existingParticipant.role) {
+    existingParticipant.role = role;
   }
   return this;
+};
+
+roomSchema.methods.upsertParticipant = function(userId, updates = {}) {
+  this.participants = normalizeParticipantList(this.participants);
+  const participant = this.participants.find((entry) => entry.user.toString() === userId.toString());
+  if (!participant) {
+    const nextParticipant = {
+      user: userId,
+      role: updates.role || 'viewer',
+      joinedAt: updates.joinedAt || new Date(),
+      isMuted: updates.isMuted || false,
+      mutedUntil: updates.mutedUntil || null,
+      muteReason: updates.muteReason || null,
+      violationCount: updates.violationCount || 0,
+      isOnline: updates.isOnline || false,
+      socketId: updates.socketId || null,
+      lastSeenAt: updates.lastSeenAt || null,
+    };
+    this.participants.push(nextParticipant);
+    if (this.participants.length > this.stats.peakParticipants) {
+      this.stats.peakParticipants = this.participants.length;
+    }
+    this.participants = normalizeParticipantList(this.participants);
+    return nextParticipant;
+  }
+
+  Object.assign(participant, updates);
+  this.participants = normalizeParticipantList(this.participants);
+  return participant;
 };
 
 // Method to remove participant
@@ -167,10 +259,16 @@ roomSchema.methods.removeParticipant = function(userId) {
   return this;
 };
 
+roomSchema.methods.compactParticipants = function() {
+  this.participants = normalizeParticipantList(this.participants);
+  this.moderators = Array.from(new Set((this.moderators || []).map((moderator) => moderator.toString())));
+  return this;
+};
+
 // Method to check if user is participant
 roomSchema.methods.isParticipant = function(userId) {
-  return this.participants.some(
-    p => p.user.toString() === userId.toString()
+  return normalizeParticipantList(this.participants).some(
+    (participant) => participant.user.toString() === userId.toString()
   );
 };
 
@@ -179,6 +277,63 @@ roomSchema.methods.isModerator = function(userId) {
   return this.host.toString() === userId.toString() ||
     this.moderators.some(m => m.toString() === userId.toString());
 };
+
+roomSchema.methods.getMemberRole = function(userId) {
+  if (this.host.toString() === userId.toString()) {
+    return 'owner';
+  }
+
+  if (this.moderators.some(m => m.toString() === userId.toString())) {
+    return 'moderator';
+  }
+
+  const participant = this.getParticipantRecord(userId);
+  return participant?.role || 'viewer';
+};
+
+roomSchema.methods.getParticipantRecord = function(userId) {
+  const normalized = normalizeParticipantList(this.participants);
+  const matches = normalized.filter((participant) => participant.user.toString() === userId.toString());
+  if (matches.length === 0) return null;
+
+  return matches.reduce((highest, current) => {
+    const highestRole = highest.role || 'viewer';
+    const currentRole = current.role || 'viewer';
+
+    if (rolePriority[currentRole] > rolePriority[highestRole]) {
+      return current;
+    }
+
+    if (rolePriority[currentRole] < rolePriority[highestRole]) {
+      return highest;
+    }
+
+    return pickMoreRecentDate(highest.lastSeenAt || highest.joinedAt, current.lastSeenAt || current.joinedAt) === current.lastSeenAt || current.joinedAt
+      ? current
+      : highest;
+  });
+};
+
+roomSchema.methods.canSendMessage = function(userId) {
+  const role = this.getMemberRole(userId);
+  return ['owner', 'moderator', 'participant'].includes(role);
+};
+
+roomSchema.methods.canReact = function(userId) {
+  const role = this.getMemberRole(userId);
+  return ['owner', 'moderator', 'participant', 'viewer'].includes(role);
+};
+
+roomSchema.methods.canModerate = function(userId) {
+  return this.host.toString() === userId.toString() ||
+    this.moderators.some(m => m.toString() === userId.toString());
+};
+
+roomSchema.pre('save', function(next) {
+  this.participants = normalizeParticipantList(this.participants);
+  this.moderators = Array.from(new Set((this.moderators || []).map((moderator) => moderator.toString())));
+  next();
+});
 
 // Static method to get active public rooms
 roomSchema.statics.getActivePublicRooms = function() {
