@@ -11,12 +11,21 @@ const { body, param, query, validationResult } = require('express-validator');
 const validate = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
+    const details = errors.array().map(e => ({
+      field: e.path,
+      message: e.msg
+    }));
+    console.warn('Validation failed for', req.method, req.originalUrl, {
+      body: req.body,
+      headers: {
+        'content-type': req.headers['content-type'],
+        authorization: req.headers.authorization ? '[present]' : '[missing]',
+      },
+      details,
+    });
     return res.status(400).json({
       error: 'Validation failed',
-      details: errors.array().map(e => ({
-        field: e.path,
-        message: e.msg
-      }))
+      details
     });
   }
   next();
@@ -51,9 +60,13 @@ const registerValidation = [
 const loginValidation = [
   body('email')
     .trim()
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Please enter a valid email'),
+    .custom((value) => {
+      if (!value) throw new Error('Email or username is required');
+      const isEmail = /\S+@\S+\.\S+/.test(value);
+      const isUsername = /^[a-zA-Z0-9_]{3,30}$/.test(value);
+      if (!isEmail && !isUsername) throw new Error('Please enter a valid email or username');
+      return true;
+    }),
   body('password')
     .notEmpty()
     .withMessage('Password is required'),

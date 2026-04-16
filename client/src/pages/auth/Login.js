@@ -29,9 +29,7 @@ const Login = () => {
     const newErrors = {};
     
     if (!formData.email) {
-      newErrors.email = 'Email is required';
-    } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email';
+      newErrors.email = 'Email or username is required';
     }
     
     if (!formData.password) {
@@ -81,10 +79,10 @@ const Login = () => {
         )}
         
         <Input
-          label="Email address"
-          type="email"
+          label="Email or username"
+          type="text"
           name="email"
-          placeholder="you@example.com"
+          placeholder="you@example.com or johndoe"
           icon={Mail}
           value={formData.email}
           onChange={handleChange}

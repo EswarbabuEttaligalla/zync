@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const socketHandler = require('../socket/socketHandler');
+const errorHandler = require('../middleware/errorHandler');
 
 test('socket message rate limiting blocks bursts over the configured threshold', () => {
   const socket = { id: 'socket-rate-limit-test', userId: 'user-rate-limit-test' };
@@ -49,4 +50,25 @@ test('socket connection rate limiting uses the sliding window guard', () => {
 
   const blocked = socketHandler.checkConnectionRateLimit(socket);
   assert.equal(blocked.allowed, false);
+});
+
+test('malformed JSON payloads return a stable 400 response', () => {
+  const req = { originalUrl: '/api/messages/room-1' };
+  const response = {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+
+  errorHandler({ type: 'entity.parse.failed' }, req, response, () => {});
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.body.error, 'Malformed JSON payload');
 });

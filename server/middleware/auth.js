@@ -25,12 +25,19 @@ const authenticateToken = async (req, res, next) => {
     const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
     if (!token) {
+      console.warn('Auth: missing token - headers:', req.headers?.authorization || req.headers);
       return res.status(401).json({ 
         error: 'Access denied. No token provided.' 
       });
     }
 
-    const decoded = jwt.verify(token, getJwtSecret());
+    let decoded;
+    try {
+      decoded = jwt.verify(token, getJwtSecret());
+    } catch (jwtErr) {
+      console.warn('Auth: token verification failed', jwtErr && jwtErr.message);
+      throw jwtErr;
+    }
     
     const user = await User.findById(decoded.userId);
     
@@ -70,7 +77,7 @@ const authenticateToken = async (req, res, next) => {
         error: 'Invalid token.' 
       });
     }
-    console.error('Auth middleware error:', error);
+    console.error('Auth middleware error:', error && error.message ? error.message : error);
     return res.status(500).json({ 
       error: 'Authentication error.' 
     });
@@ -129,17 +136,21 @@ const optionalAuth = async (req, res, next) => {
  */
 const generateTokens = (userId) => {
   const jwtSecret = getJwtSecret();
+  const refreshSecret = process.env.JWT_REFRESH_SECRET || jwtSecret;
+
+  const accessExpires = process.env.JWT_EXPIRES_IN || process.env.JWT_EXPIRE || '7d';
+  const refreshExpires = process.env.JWT_REFRESH_EXPIRES_IN || process.env.JWT_REFRESH_EXPIRE || '30d';
 
   const accessToken = jwt.sign(
     { userId },
     jwtSecret,
-    { expiresIn: process.env.JWT_EXPIRE || '7d' }
+    { expiresIn: accessExpires }
   );
 
   const refreshToken = jwt.sign(
     { userId, type: 'refresh' },
-    jwtSecret,
-    { expiresIn: process.env.JWT_REFRESH_EXPIRE || '30d' }
+    refreshSecret,
+    { expiresIn: refreshExpires }
   );
 
   return { accessToken, refreshToken };
@@ -150,7 +161,8 @@ const generateTokens = (userId) => {
  */
 const verifyRefreshToken = async (refreshToken) => {
   try {
-    const decoded = jwt.verify(refreshToken, getJwtSecret());
+    const refreshSecret = process.env.JWT_REFRESH_SECRET || getJwtSecret();
+    const decoded = jwt.verify(refreshToken, refreshSecret);
     
     if (decoded.type !== 'refresh') {
       throw new Error('Invalid token type');
@@ -164,6 +176,7 @@ const verifyRefreshToken = async (refreshToken) => {
 
     return user;
   } catch (error) {
+    console.warn('Refresh token verification failed:', error && error.message);
     throw new Error('Invalid refresh token');
   }
 };

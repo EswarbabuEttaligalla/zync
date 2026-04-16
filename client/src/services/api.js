@@ -10,19 +10,23 @@ const api = axios.create({
   withCredentials: true,
 });
 
+const readPersistedAuth = () => {
+  try {
+    const stored = localStorage.getItem('zync-auth');
+    if (!stored) return null;
+    const parsed = JSON.parse(stored);
+    return parsed?.state || null;
+  } catch (error) {
+    return null;
+  }
+};
+
 // Request interceptor to add auth token
 api.interceptors.request.use(
   (config) => {
-    try {
-      const stored = localStorage.getItem('zync-auth');
-      if (stored) {
-        const { state } = JSON.parse(stored);
-        if (state?.accessToken) {
-          config.headers.Authorization = `Bearer ${state.accessToken}`;
-        }
-      }
-    } catch (e) {
-      // Ignore parse errors
+    const authState = readPersistedAuth();
+    if (authState?.accessToken) {
+      config.headers.Authorization = `Bearer ${authState.accessToken}`;
     }
     return config;
   },
@@ -39,24 +43,23 @@ api.interceptors.response.use(
       originalRequest._retry = true;
       
       try {
-        const refreshToken = localStorage.getItem('zync-auth')
-          ? JSON.parse(localStorage.getItem('zync-auth')).state.refreshToken
-          : null;
+        const refreshToken = readPersistedAuth()?.refreshToken || null;
           
         if (refreshToken) {
           const response = await axios.post(`${API_URL}/auth/refresh`, { refreshToken });
           const { accessToken, refreshToken: newRefreshToken } = response.data;
           
           // Update stored tokens
-          const stored = JSON.parse(localStorage.getItem('zync-auth') || '{}');
-          stored.state = {
-            ...stored.state,
+          const stored = readPersistedAuth() || {};
+          const nextState = {
+            ...stored,
             accessToken,
             refreshToken: newRefreshToken,
           };
-          localStorage.setItem('zync-auth', JSON.stringify(stored));
+          localStorage.setItem('zync-auth', JSON.stringify({ state: nextState, version: 0 }));
           
           api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
+          originalRequest.headers = originalRequest.headers || {};
           originalRequest.headers['Authorization'] = `Bearer ${accessToken}`;
           
           return api(originalRequest);
@@ -138,4 +141,8 @@ export const adminAPI = {
   deleteMessage: (messageId) => api.delete(`/admin/messages/${messageId}`),
   reviewMessage: (messageId, data) => api.put(`/admin/messages/${messageId}/review`, data),
   getAnalytics: () => api.get('/admin/analytics'),
+};
+
+export const publicAPI = {
+  getPublicStats: () => api.get('/public/stats'),
 };

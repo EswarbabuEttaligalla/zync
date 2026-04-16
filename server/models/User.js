@@ -117,15 +117,26 @@ userSchema.methods.getPublicProfile = function() {
 };
 
 // Static method to find by credentials
-userSchema.statics.findByCredentials = async function(email, password) {
-  const user = await this.findOne({ email }).select('+password');
+userSchema.statics.findByCredentials = async function(identifier, password) {
+  // Accept either email or username as identifier
+  const isEmail = typeof identifier === 'string' && /\S+@\S+\.\S+/.test(identifier);
+  const query = isEmail
+    ? { email: identifier.toLowerCase().trim() }
+    : { username: identifier.trim() };
+  const user = await this.findOne(query).select('+password');
   if (!user) {
-    throw new Error('Invalid credentials');
+    const err = new Error('Invalid credentials');
+    err.statusCode = 401;
+    err.isOperational = true;
+    throw err;
   }
   
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
-    throw new Error('Invalid credentials');
+    const err = new Error('Invalid credentials');
+    err.statusCode = 401;
+    err.isOperational = true;
+    throw err;
   }
   
   if (user.status === 'banned') {

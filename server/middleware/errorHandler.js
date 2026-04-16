@@ -4,7 +4,19 @@
  */
 
 const errorHandler = (err, req, res, next) => {
-  console.error('Error:', err);
+  if (err && err.type === 'entity.parse.failed') {
+    console.warn('Warning: malformed JSON payload rejected for', req.originalUrl);
+    return res.status(400).json({
+      error: 'Malformed JSON payload',
+    });
+  }
+
+  // Log only non-operational errors with full stack to reduce noise for common client errors
+  if (err && err.isOperational) {
+    console.warn('Warning:', err.message);
+  } else {
+    console.error('Error:', err);
+  }
 
   // Mongoose validation error
   if (err.name === 'ValidationError') {

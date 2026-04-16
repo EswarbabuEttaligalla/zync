@@ -16,6 +16,7 @@ const { asyncHandler } = require('../middleware/errorHandler');
  * @access  Public
  */
 router.post('/register', registerValidation, asyncHandler(async (req, res) => {
+  console.debug('[auth] register payload:', { body: req.body, headers: req.headers && { origin: req.headers.origin, 'content-type': req.headers['content-type'] } });
   const { username, email, password, firstName, lastName } = req.body;
 
   // Check if user already exists
@@ -65,6 +66,7 @@ router.post('/register', registerValidation, asyncHandler(async (req, res) => {
  * @access  Public
  */
 router.post('/login', loginValidation, asyncHandler(async (req, res) => {
+  console.debug('[auth] login payload:', { body: req.body, headers: req.headers && { origin: req.headers.origin, 'content-type': req.headers['content-type'] } });
   const { email, password } = req.body;
 
   // Find user and validate credentials
@@ -107,6 +109,7 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
  * @access  Public
  */
 router.post('/refresh', asyncHandler(async (req, res) => {
+  console.debug('[auth] refresh payload:', { body: req.body, headers: req.headers && { origin: req.headers.origin, 'content-type': req.headers['content-type'] } });
   const { refreshToken } = req.body;
 
   if (!refreshToken) {
