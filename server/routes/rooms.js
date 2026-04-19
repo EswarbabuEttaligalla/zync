@@ -101,7 +101,7 @@ router.post('/', createRoomValidation, asyncHandler(async (req, res) => {
     moderators: [req.userId],
     participants: [{
       user: req.userId,
-      role: 'participant'
+      role: 'owner'
     }],
     settings: {
       ...settings,
@@ -253,7 +253,7 @@ router.post('/:roomId/join', asyncHandler(async (req, res) => {
 
   // For public rooms - direct join
   if (room.privacy === 'public' && !room.settings.requireApproval) {
-    room.addParticipant(req.userId);
+    room.addParticipant(req.userId, 'viewer');
     await room.save();
 
     req.user.stats.roomsJoined++;
@@ -369,7 +369,7 @@ router.post('/:roomId/requests/:requestId/approve', asyncHandler(async (req, res
   await joinRequest.save();
 
   // Add user to room
-  room.addParticipant(joinRequest.user);
+  room.addParticipant(joinRequest.user, 'participant');
   await room.save();
 
   // Update user stats

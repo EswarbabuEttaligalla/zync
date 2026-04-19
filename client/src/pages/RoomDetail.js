@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -40,7 +40,26 @@ const RoomDetail = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuthStore();
-  const { socket, isConnected, joinRoom, leaveRoom, sendMessage, setTyping } = useSocketStore();
+  const {
+    socket,
+    isConnected,
+    connectionStatus,
+    joinRoom,
+    leaveRoom,
+    sendMessage,
+    startTyping,
+    stopTyping,
+    requestSpeakerAccess,
+    approveSpeakerRequest,
+    rejectSpeakerRequest,
+    reactToMessage,
+    messages: roomMessages,
+    typingUsers: roomTypingUsers,
+    onlineUsers: roomOnlineUsers,
+    notifications,
+    speakerRequests,
+    roomState,
+  } = useSocketStore();
   
   const messagesEndRef = useRef(null);
   const messageInputRef = useRef(null);
@@ -48,9 +67,6 @@ const RoomDetail = () => {
   const [message, setMessage] = useState('');
   const [showSidebar, setShowSidebar] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
-  const [messages, setMessages] = useState([]);
-  const [typingUsers, setTypingUsers] = useState([]);
-  const [onlineUsers, setOnlineUsers] = useState([]);
   const [aiWarning, setAiWarning] = useState(null);
 
   // Fetch room data
@@ -64,7 +80,7 @@ const RoomDetail = () => {
   
   const room = roomData?.room;
 
-  // Initial messages fetch
+  // Initial messages fetch remains a fallback until socket state arrives
   const { data: initialMessages } = useQuery({
     queryKey: ['messages', roomId],
     queryFn: async () => {
@@ -89,141 +105,88 @@ const RoomDetail = () => {
 
   // Set initial messages
   useEffect(() => {
-    if (initialMessages?.messages) {
-      setMessages(initialMessages.messages);
-    }
-  }, [initialMessages]);
-
-  // Socket event listeners
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleNewMessage = (message) => {
-      setMessages(prev => [...prev, message]);
-      
-      if (message.moderation) {
-        handleAIAnalysis(message.moderation, message);
-      }
-    };
-
-    const handleUserTyping = (data) => {
-      if (data.isTyping) {
-        setTypingUsers(prev => [...prev.filter(u => u.id !== data.userId), { id: data.userId, username: data.username }]);
-      } else {
-        setTypingUsers(prev => prev.filter(u => u.id !== data.userId));
-      }
-    };
-
-    const handleUserJoined = (user) => {
-      setOnlineUsers(prev => [...prev.filter(u => u.id !== user.userId), {
-        id: user.userId,
-        username: user.username,
-        avatar: user.avatar
-      }]);
-    };
-
-    const handleUserLeft = (user) => {
-      setOnlineUsers(prev => prev.filter(u => u.id !== user.userId));
-    };
-
-    const handleMessageFlagged = (data) => {
-      if (data?.blocked) {
-        setAiWarning({
-          type: 'toxicity',
-          message: data.reason || 'Message blocked due to inappropriate language.',
-          suggestions: data.suggestions || ['Please rephrase your message respectfully.'],
-          toxicityScore: 1,
-        });
-
-        window.setTimeout(() => setAiWarning(null), 5000);
-        return;
-      }
-
-      setMessages(prev => [...prev, { ...data.message, isFlagged: true }]);
-    };
-
-    const handleMessageBlocked = (data) => {
+    const handleAiWarning = (event) => {
+      const detail = event.detail || {};
       setAiWarning({
-        type: 'toxicity',
-        message: data.reason || 'Message blocked due to inappropriate language.',
-        suggestions: data.suggestions || ['Please rephrase your message respectfully.'],
-        toxicityScore: 1,
+        type: detail.type || 'toxicity',
+        message: detail.message || detail.reason || 'Message blocked due to inappropriate language.',
+        suggestions: detail.suggestions || ['Please rephrase your message respectfully.'],
+        toxicityScore: detail.toxicityScore || 1,
       });
-
       window.setTimeout(() => setAiWarning(null), 5000);
     };
 
-    const handleRoomJoined = (data) => {
-      setOnlineUsers(data.room.onlineUsers || []);
-      if (data.messages) {
-        setMessages(data.messages);
-      }
+    window.addEventListener('ai-warning', handleAiWarning);
+    return () => window.removeEventListener('ai-warning', handleAiWarning);
+  }, []);
+
+  const fallbackMessages = initialMessages?.messages || [];
+  const messages = useMemo(
+    () => (roomMessages?.length ? roomMessages : fallbackMessages),
+    [roomMessages, fallbackMessages]
+  );
+  const typingUsers = roomTypingUsers || [];
+  const onlineUsers = roomOnlineUsers || [];
+  const currentParticipant = roomState?.participants?.find((participant) => {
+    const participantId = participant.id || participant._id || participant.userId || participant.user?.id || participant.user?._id;
+    return participantId?.toString?.() === user?._id?.toString?.();
+  });
+  const isMuted = Boolean(currentParticipant?.isMuted && (!currentParticipant.mutedUntil || new Date(currentParticipant.mutedUntil) > new Date()));
+  const pendingSpeakerRequest = speakerRequests.some((request) => request.user?._id?.toString?.() === user?._id?.toString?.() || request.user?.id?.toString?.() === user?._id?.toString?.());
+
+  const groupedMessages = useMemo(() => messages.map((msg, index) => {
+    const previous = messages[index - 1];
+    const senderId = msg.sender?.id || msg.sender?._id;
+    const previousSenderId = previous?.sender?.id || previous?.sender?._id;
+    return {
+      message: msg,
+      showAvatar: index === 0 || senderId !== previousSenderId,
+    };
+  }), [messages]);
+
+  const participantsByRole = useMemo(() => {
+    const buckets = {
+      owner: [],
+      moderator: [],
+      participant: [],
+      viewer: [],
     };
 
-    socket.off('message:received', handleNewMessage);
-    socket.off('typing:update', handleUserTyping);
-    socket.off('room:user-joined', handleUserJoined);
-    socket.off('room:user-left', handleUserLeft);
-    socket.off('message:flagged', handleMessageFlagged);
-    socket.off('message:blocked', handleMessageBlocked);
-    socket.off('room:joined', handleRoomJoined);
+    (roomState?.participants || []).forEach((participant) => {
+      const role = participant.role || 'viewer';
+      if (!buckets[role]) buckets.viewer.push(participant);
+      else buckets[role].push(participant);
+    });
 
-    socket.on('message:received', handleNewMessage);
-    socket.on('typing:update', handleUserTyping);
-    socket.on('room:user-joined', handleUserJoined);
-    socket.on('room:user-left', handleUserLeft);
-    socket.on('message:flagged', handleMessageFlagged);
-    socket.on('message:blocked', handleMessageBlocked);
-    socket.on('room:joined', handleRoomJoined);
-
-    return () => {
-      socket.off('message:received', handleNewMessage);
-      socket.off('typing:update', handleUserTyping);
-      socket.off('room:user-joined', handleUserJoined);
-      socket.off('room:user-left', handleUserLeft);
-      socket.off('message:flagged', handleMessageFlagged);
-      socket.off('message:blocked', handleMessageBlocked);
-      socket.off('room:joined', handleRoomJoined);
-    };
-  }, [socket]);
+    const sortByName = (left, right) => (left.user?.username || '').localeCompare(right.user?.username || '');
+    Object.keys(buckets).forEach((key) => buckets[key].sort(sortByName));
+    return buckets;
+  }, [roomState?.participants]);
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleAIAnalysis = (moderation, message) => {
-    if (moderation?.toxicity?.flagged) {
-      setAiWarning({
-        type: 'toxicity',
-        severity: 'high',
-        message: 'This message contains potentially harmful content',
-      });
-    } else if (moderation?.fallacy?.detected) {
-      setAiWarning({
-        type: 'fallacy',
-        severity: 'warning',
-        fallacies: moderation.fallacy.types,
-        message: 'Logical fallacy detected in this argument',
-      });
-    }
-
-    // Auto-dismiss warning
-    setTimeout(() => setAiWarning(null), 5000);
-  };
-
-  const handleSendMessage = (e) => {
+  const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!message.trim()) return;
+    if (!message.trim() || !canSendMessage || isMuted || !isConnected) return;
 
-    sendMessage(roomId, message.trim());
+    const response = await sendMessage(roomId, message.trim());
+    if (!response?.ok) {
+      toast.error(response?.error || response?.reason || 'Failed to send message');
+    }
     setMessage('');
-    setTyping(roomId, false);
+    stopTyping(roomId);
   };
 
   const handleTyping = (e) => {
     setMessage(e.target.value);
-    setTyping(roomId, e.target.value.length > 0);
+    if (e.target.value.length > 0) {
+      startTyping(roomId);
+    } else {
+      stopTyping(roomId);
+    }
   };
 
   const handleLeaveRoom = async () => {
@@ -261,11 +224,22 @@ const RoomDetail = () => {
 
   const isHost = room.host?._id === user?._id;
   const isModerator = room.moderators?.some(m => m._id === user?._id);
+  const canRequestSpeaker = roomState?.canRequestSpeaker;
+  const roomRole = roomState?.role || (isHost ? 'owner' : isModerator ? 'moderator' : 'viewer');
+  const canSendMessage = roomState?.canSendMessage ?? true;
+  const canRequestSpeakerNow = canRequestSpeaker && !pendingSpeakerRequest;
 
   return (
     <div className="flex h-[calc(100vh-6rem)] -m-6 bg-dark-950">
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
+        {!isConnected && (
+          <div className="px-6 py-2 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-sm flex items-center justify-between">
+            <span>{connectionStatus === 'reconnecting' ? 'Reconnecting to live debate...' : 'Disconnected from live updates. Trying to recover...'}</span>
+            <span className="animate-pulse">Live sync pending</span>
+          </div>
+        )}
+
         {/* Chat Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-dark-800 bg-dark-900/50">
           <div className="flex items-center gap-4">
@@ -280,12 +254,23 @@ const RoomDetail = () => {
                 <Badge variant={room.status === 'active' ? 'success' : 'warning'} size="sm">
                   {room.status}
                 </Badge>
+                <Badge variant={roomRole === 'owner' || roomRole === 'moderator' ? 'primary' : 'default'} size="sm">
+                  {roomRole}
+                </Badge>
+                {isMuted && <Badge variant="warning" size="sm">Muted</Badge>}
               </div>
               <p className="text-sm text-dark-400">{room.category}</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            <div className={cn('flex items-center gap-2 px-3 py-1.5 rounded-full border', isConnected ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-amber-500/10 border-amber-500/20')}>
+              <span className={cn('h-2 w-2 rounded-full', isConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse')} />
+              <span className={cn('text-sm', isConnected ? 'text-emerald-400' : 'text-amber-300')}>
+                {isConnected ? 'Live' : connectionStatus === 'reconnecting' ? 'Reconnecting' : 'Offline'}
+              </span>
+            </div>
+
             {/* AI Status Indicator */}
             <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
               <Sparkles className="w-4 h-4 text-emerald-400" />
@@ -377,14 +362,22 @@ const RoomDetail = () => {
           )}
 
           {/* Messages */}
-          {messages.map((msg, index) => (
+          {groupedMessages.map(({ message: msg, showAvatar }, index) => (
             <ChatMessage
               key={msg._id || msg.id || index}
               message={msg}
               isOwn={msg.sender?.id === user?._id || msg.sender?._id === user?._id}
-              showAvatar={index === 0 || messages[index - 1]?.sender?.id !== msg.sender?.id}
+              showAvatar={showAvatar}
             />
           ))}
+
+          {messages.length === 0 && (
+            <div className="rounded-3xl border border-dashed border-dark-700 bg-dark-900/40 p-8 text-center">
+              <Sparkles className="mx-auto mb-3 h-8 w-8 text-primary-400" />
+              <h3 className="text-white font-semibold mb-1">No messages yet</h3>
+              <p className="text-dark-400 text-sm">Be the first to start the debate. Live moderation and reactions will appear here.</p>
+            </div>
+          )}
 
           {/* Typing Indicator */}
           {typingUsers.length > 0 && (
@@ -411,10 +404,11 @@ const RoomDetail = () => {
                 ref={messageInputRef}
                 value={message}
                 onChange={handleTyping}
-                placeholder="Type your argument..."
+                placeholder={canSendMessage ? 'Type your argument...' : 'Request speaker access to send messages'}
                 rows={1}
                 className="w-full bg-transparent px-4 py-3 text-white placeholder-dark-400 resize-none focus:outline-none"
                 style={{ minHeight: '48px', maxHeight: '120px' }}
+                disabled={!canSendMessage || isMuted || !isConnected}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -435,10 +429,39 @@ const RoomDetail = () => {
               </div>
             </div>
             
-            <Button type="submit" disabled={!message.trim()} className="h-12 w-12 !p-0">
+            <Button type="submit" disabled={!message.trim() || !canSendMessage || isMuted || !isConnected} className="h-12 w-12 !p-0">
               <Send className="w-5 h-5" />
             </Button>
           </div>
+          {!isConnected && (
+            <p className="mt-3 text-xs text-amber-300">You can still type, but sending is disabled until the live connection recovers.</p>
+          )}
+          {isMuted && (
+            <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+              Your messages are currently muted. You can continue reading and reacting, but sending is disabled.
+            </div>
+          )}
+          {canRequestSpeaker && (
+            <div className="flex items-center justify-between mt-3 rounded-xl border border-primary-500/20 bg-primary-500/5 px-4 py-3">
+              <div>
+                <p className="text-sm font-medium text-white">Need to speak in this room?</p>
+                <p className="text-xs text-dark-400">Request speaker access and the owner will be notified instantly.</p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!canRequestSpeakerNow}
+                onClick={async () => {
+                  const response = await requestSpeakerAccess(roomId, 'I would like to join the debate as a speaker.');
+                  if (response?.ok) toast.success('Speaker request sent');
+                  else toast.error(response?.error || 'Unable to send request');
+                }}
+              >
+                {pendingSpeakerRequest ? 'Request Pending' : 'Request Access'}
+              </Button>
+            </div>
+          )}
           
           <div className="flex items-center gap-2 mt-2 text-xs text-dark-500">
             <Zap className="w-3 h-3" />
@@ -464,6 +487,31 @@ const RoomDetail = () => {
             </div>
 
             <div className="p-4 space-y-2 overflow-y-auto h-[calc(100%-60px)] scrollbar-thin">
+              {isHost && speakerRequests.length > 0 && (
+                <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3">
+                  <h4 className="text-xs font-medium text-amber-400 uppercase mb-2">Speaker Requests</h4>
+                  <div className="space-y-2">
+                    {speakerRequests.map((request) => (
+                      <div key={request.id} className="rounded-xl border border-dark-700 bg-dark-800/60 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-medium text-white truncate">{request.user?.username || 'User'}</span>
+                          <span className="text-[11px] text-dark-400">pending</span>
+                        </div>
+                        <p className="mt-1 text-xs text-dark-400">{request.message || 'No message provided'}</p>
+                        <div className="mt-3 flex gap-2">
+                          <Button size="sm" onClick={async () => approveSpeakerRequest(roomId, request.id)}>
+                            Approve
+                          </Button>
+                          <Button size="sm" variant="secondary" onClick={async () => rejectSpeakerRequest(roomId, request.id, 'Not enough room time right now')}>
+                            Reject
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Host */}
               {room.host && (
                 <div className="mb-4">
@@ -511,33 +559,61 @@ const RoomDetail = () => {
               {/* Participants */}
               <div>
                 <h4 className="text-xs font-medium text-dark-400 uppercase mb-2">
-                  Members ({room.participants?.length || 0})
+                  Members ({roomState?.participants?.length || room.participants?.length || 0})
                 </h4>
-                {room.participants?.map((participant) => {
-                  const isOnline = onlineUsers.some(u => u.id === participant.user?._id);
+                {(['owner', 'moderator', 'participant', 'viewer']).map((role) => {
+                  const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+                  const participants = participantsByRole[role] || [];
+                  if (participants.length === 0) return null;
+
                   return (
-                    <div
-                      key={participant.user?._id}
-                      className="flex items-center gap-3 p-2 rounded-xl hover:bg-dark-800/50 transition-colors"
-                    >
-                      <Avatar
-                        src={participant.user?.profile?.avatar}
-                        name={participant.user?.username}
-                        size="sm"
-                        status={isOnline ? 'online' : 'offline'}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <span className="font-medium text-white truncate block">
-                          {participant.user?.username}
-                        </span>
-                        <span className="text-xs text-dark-400">
-                          {isOnline ? 'Online' : 'Offline'}
-                        </span>
+                    <div key={role} className="mb-4 last:mb-0">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-dark-500">{roleLabel}</span>
+                        <span className="text-[11px] text-dark-500">{participants.length}</span>
+                      </div>
+                      <div className="space-y-1">
+                        {participants.map((participant) => {
+                          const participantId = participant.user?._id || participant.id || participant.userId;
+                          const isOnline = onlineUsers.some(u => (u.id || u._id)?.toString?.() === participantId?.toString?.());
+                          return (
+                            <div
+                              key={participantId}
+                              className="flex items-center gap-3 p-2 rounded-xl hover:bg-dark-800/50 transition-colors"
+                            >
+                              <Avatar
+                                src={participant.user?.profile?.avatar}
+                                name={participant.user?.username}
+                                size="sm"
+                                status={isOnline ? 'online' : 'offline'}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-white truncate block">
+                                    {participant.user?.username}
+                                  </span>
+                                  <Badge size="sm" variant={role === 'owner' ? 'warning' : role === 'moderator' ? 'primary' : 'default'}>
+                                    {roleLabel}
+                                  </Badge>
+                                </div>
+                                <span className="text-xs text-dark-400">
+                                  {isOnline ? 'Online' : participant.lastSeenAt ? `Last seen ${new Date(participant.lastSeenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Offline'}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
                 })}
               </div>
+
+              {roomState?.participants?.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-dark-700 p-4 text-center text-dark-400">
+                  No participants loaded yet.
+                </div>
+              )}
             </div>
           </motion.div>
         )}
