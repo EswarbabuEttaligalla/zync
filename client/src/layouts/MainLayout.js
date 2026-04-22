@@ -84,7 +84,7 @@ const MainLayout = () => {
                   exit={{ opacity: 0, width: 0 }}
                   className="text-xl font-bold text-white overflow-hidden whitespace-nowrap"
                 >
-                  AI<span className="text-primary-400">110</span>
+                  {process.env.REACT_APP_BRAND || 'Zync'}
                 </motion.span>
               )}
             </AnimatePresence>
@@ -185,13 +185,11 @@ const MainLayout = () => {
           <Menu className="w-6 h-6" />
         </button>
         
-        <Link to="/dashboard" className="flex items-center gap-2">
+          <Link to="/dashboard" className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center">
             <Zap className="w-5 h-5 text-white" />
           </div>
-          <span className="text-lg font-bold text-white">
-            AI<span className="text-primary-400">110</span>
-          </span>
+          <span className="text-lg font-bold text-white">{process.env.REACT_APP_BRAND || 'Zync'}</span>
         </Link>
         
         <button className="p-2 text-dark-400 hover:text-white rounded-lg relative">
@@ -223,9 +221,7 @@ const MainLayout = () => {
                   <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center">
                     <Zap className="w-6 h-6 text-white" />
                   </div>
-                  <span className="text-xl font-bold text-white">
-                    AI<span className="text-primary-400">110</span>
-                  </span>
+                  <span className="text-xl font-bold text-white">{process.env.REACT_APP_BRAND || 'Zync'}</span>
                 </Link>
                 <button
                   onClick={() => setMobileMenuOpen(false)}

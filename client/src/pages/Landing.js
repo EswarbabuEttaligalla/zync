@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Button, Badge } from '../components/ui';
 import { useAuthStore } from '../store/authStore';
+import { publicAPI } from '../services/api';
 
 const Landing = () => {
   const { isAuthenticated } = useAuthStore();
@@ -64,12 +65,57 @@ const Landing = () => {
     },
   ];
 
-  const stats = [
-    { value: '50K+', label: 'Active Debaters' },
-    { value: '10K+', label: 'Debates Hosted' },
-    { value: '99.9%', label: 'Uptime' },
-    { value: '95%', label: 'Toxicity Blocked' },
-  ];
+  const [stats, setStats] = useState([
+    { value: '—', label: 'Active Debaters' },
+    { value: '—', label: 'Debates Hosted' },
+    { value: '—', label: 'Uptime' },
+    { value: '—', label: 'Toxicity Blocked' },
+  ]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchStats = async () => {
+      try {
+        const resp = await publicAPI.getPublicStats();
+        const data = resp.data || {};
+
+        const active = data.activeUsers ?? data.totalUsers ?? 0;
+        const rooms = data.totalRooms ?? 0;
+        const uptimeSeconds = data.uptimeSeconds ?? 0;
+        const toxicityPct = data.toxicityBlockedPct ?? 0;
+
+        const uptimeStr = (() => {
+          if (!uptimeSeconds) return '—';
+          const days = Math.floor(uptimeSeconds / 86400);
+          const hours = Math.floor((uptimeSeconds % 86400) / 3600);
+          if (days > 0) return `${days}d ${hours}h`;
+          if (hours > 0) return `${hours}h`;
+          const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+          return `${minutes}m`;
+        })();
+
+        if (!mounted) return;
+
+        setStats([
+          { value: active.toLocaleString(), label: 'Active Debaters' },
+          { value: rooms.toLocaleString(), label: 'Debates Hosted' },
+          { value: uptimeStr, label: 'Uptime' },
+          { value: `${toxicityPct}%`, label: 'Toxicity Blocked' },
+        ]);
+      } catch (err) {
+        // silently ignore; keep placeholders
+      }
+    };
+
+    fetchStats();
+
+    const interval = setInterval(fetchStats, 60 * 1000); // refresh every minute
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-dark-950 overflow-hidden">

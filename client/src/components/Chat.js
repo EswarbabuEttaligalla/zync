@@ -8,9 +8,11 @@ import {
   Check,
   X,
   ThumbsUp,
+  Heart,
+  Flame,
+  Laugh,
+  PartyPopper,
   ThumbsDown,
-  Lightbulb,
-  BookOpen,
   Shield,
   MoreHorizontal,
   Reply,
@@ -147,18 +149,21 @@ export const ChatContainer = ({ roomId, className }) => {
 };
 
 // Chat Message Component
-export const ChatMessage = ({ message, isOwn }) => {
+export const ChatMessage = ({ message, isOwn, showAvatar = true }) => {
   const [showActions, setShowActions] = useState(false);
-  const { addReaction } = useSocketStore();
+  const { reactToMessage } = useSocketStore();
 
   const hasWarning = message.moderation?.toxicity?.flagged || message.moderation?.fallacy?.detected;
   const isFlagged = message.isFlagged || message.status === 'blocked' || message.status === 'flagged';
+  const isPending = message.pending || message.status === 'pending';
 
   const reactions = [
     { type: 'agree', icon: ThumbsUp, label: 'Agree' },
+    { type: 'love', icon: Heart, label: 'Love' },
+    { type: 'fire', icon: Flame, label: 'Fire' },
+    { type: 'laugh', icon: Laugh, label: 'Laugh' },
+    { type: 'clap', icon: PartyPopper, label: 'Clap' },
     { type: 'disagree', icon: ThumbsDown, label: 'Disagree' },
-    { type: 'insightful', icon: Lightbulb, label: 'Insightful' },
-    { type: 'citation-needed', icon: BookOpen, label: 'Citation Needed' },
   ];
 
   return (
@@ -173,12 +178,16 @@ export const ChatMessage = ({ message, isOwn }) => {
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => setShowActions(false)}
     >
-      <Avatar
-        src={message.sender?.avatar}
-        alt={message.sender?.username}
-        size="sm"
-        status="online"
-      />
+      {showAvatar ? (
+        <Avatar
+          src={message.sender?.avatar}
+          alt={message.sender?.username}
+          size="sm"
+          status="online"
+        />
+      ) : (
+        <div className="w-8 shrink-0" />
+      )}
       
       <div className={cn('max-w-[70%]', isOwn && 'items-end')}>
         {/* Header */}
@@ -197,14 +206,21 @@ export const ChatMessage = ({ message, isOwn }) => {
         {/* Message Bubble */}
         <div
           className={cn(
-            'relative rounded-2xl px-4 py-3',
+            'relative rounded-2xl px-4 py-3 transition-all duration-200',
             isOwn
               ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white'
               : 'bg-dark-800 text-dark-100',
             isFlagged && 'border-2 border-red-500/50',
-            hasWarning && !isFlagged && 'border border-amber-500/50'
+            hasWarning && !isFlagged && 'border border-amber-500/50',
+            isPending && 'opacity-80 ring-1 ring-dashed ring-primary-500/40'
           )}
         >
+          {isPending && (
+            <div className="mb-2 flex items-center gap-2 text-xs text-primary-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary-300 animate-pulse" />
+              Sending...
+            </div>
+          )}
           <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
           
           {/* AI Warning Indicator */}
@@ -246,7 +262,7 @@ export const ChatMessage = ({ message, isOwn }) => {
               return (
                 <button
                   key={reaction.type}
-                  onClick={() => addReaction(message.id, reaction.type)}
+                  onClick={() => reactToMessage(message.id || message._id, reaction.type)}
                   className="flex items-center gap-1 px-2 py-1 bg-dark-800 rounded-full text-xs text-dark-300 hover:bg-dark-700 transition-colors"
                 >
                   <reaction.icon className="w-3 h-3" />
@@ -272,7 +288,7 @@ export const ChatMessage = ({ message, isOwn }) => {
               {reactions.map(reaction => (
                 <button
                   key={reaction.type}
-                  onClick={() => addReaction(message.id, reaction.type)}
+                  onClick={() => reactToMessage(message.id || message._id, reaction.type)}
                   className="p-1.5 text-dark-400 hover:text-primary-400 hover:bg-dark-800 rounded-lg transition-colors"
                   title={reaction.label}
                 >
