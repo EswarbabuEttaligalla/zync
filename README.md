@@ -113,9 +113,9 @@ python main.py
 ### Server (.env)
 ```env
 PORT=5000
-MONGODB_URI=mongodb://localhost:27017/zync_debate
-JWT_SECRET=your_secret_key
-JWT_REFRESH_SECRET=your_refresh_secret
+MONGODB_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/zync
+JWT_SECRET=your_jwt_secret_here
+JWT_REFRESH_SECRET=your_refresh_secret_here
 AI_SERVER_URL=http://localhost:8000
 CLIENT_URL=http://localhost:3000
 ```

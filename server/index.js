@@ -35,19 +35,38 @@ if (!process.env.JWT_SECRET || !process.env.JWT_SECRET.trim()) {
 const app = express();
 const server = http.createServer(app);
 
+const getAllowedOrigins = () => {
+  const envOrigins = (process.env.CLIENT_URL || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set([
+    'http://localhost:3000',
+    'http://localhost:5173',
+    ...envOrigins,
+  ]));
+};
+
+const allowedOrigins = getAllowedOrigins();
+
 // Socket.io setup with CORS
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  pingInterval: Number(process.env.SOCKET_PING_INTERVAL_MS || 25000),
+  pingTimeout: Number(process.env.SOCKET_PING_TIMEOUT_MS || 20000),
+  maxHttpBufferSize: Number(process.env.SOCKET_MAX_HTTP_BUFFER_SIZE || 1e6),
+  perMessageDeflate: false,
 });
 
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  origin: allowedOrigins,
   credentials: true
 }));
 
@@ -80,6 +99,8 @@ app.use('/api/rooms', authenticateToken, roomRoutes);
 app.use('/api/messages', authenticateToken, messageRoutes);
 app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/admin', authenticateToken, adminRoutes);
+const publicRoutes = require('./routes/public');
+app.use('/api/public', publicRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
