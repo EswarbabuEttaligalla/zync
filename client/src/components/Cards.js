@@ -6,7 +6,6 @@ import {
   Users,
   MessageSquare,
   Lock,
-  Globe,
   Clock,
   ArrowRight,
   Sparkles,
@@ -345,10 +344,12 @@ export const OnlineUsersList = ({ users = [], className }) => {
   );
 };
 
-export default {
+const cards = {
   RoomCard,
   StatCard,
   FeatureCard,
   ActivityItem,
   OnlineUsersList,
 };
+
+export default cards;

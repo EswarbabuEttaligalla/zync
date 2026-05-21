@@ -396,7 +396,7 @@ export const Skeleton = ({ className, ...props }) => {
   );
 };
 
-export default {
+const ui = {
   Button,
   Input,
   Textarea,
@@ -412,3 +412,5 @@ export default {
   Skeleton,
   cn,
 };
+
+export default ui;

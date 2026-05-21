@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Outlet, NavLink, Link, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
@@ -15,11 +15,9 @@ import {
   Bell,
   ChevronDown,
   Sparkles,
-  Moon,
-  Sun,
   Zap,
 } from 'lucide-react';
-import { Avatar, Button, Badge, cn } from '../components/ui';
+import { Avatar, Button, cn } from '../components/ui';
 import { useAuthStore } from '../store/authStore';
 import { useSocketStore } from '../store/socketStore';
 
@@ -32,7 +30,6 @@ const MainLayout = () => {
   const { user, logout, accessToken } = useAuthStore();
   const { connect, disconnect, isConnected } = useSocketStore();
   const navigate = useNavigate();
-  const location = useLocation();
 
   // Connect to socket on mount
   useEffect(() => {

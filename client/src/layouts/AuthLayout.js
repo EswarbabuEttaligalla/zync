@@ -109,10 +109,10 @@ const AuthLayout = () => {
           
           {/* Bottom */}
             <div className="flex items-center gap-6 text-sm text-white/50">
-            <span>© 2026 Zync</span>
-            <a href="#" className="hover:text-white transition-colors">Privacy Policy</a>
-            <a href="#" className="hover:text-white transition-colors">Terms of Service</a>
-          </div>
+              <span>© 2026 Zync</span>
+              <button type="button" className="hover:text-white transition-colors">Privacy Policy</button>
+              <button type="button" className="hover:text-white transition-colors">Terms of Service</button>
+            </div>
         </div>
       </div>
       

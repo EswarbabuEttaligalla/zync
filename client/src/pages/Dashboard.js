@@ -7,7 +7,6 @@ import {
   Users,
   PlusCircle,
   TrendingUp,
-  Clock,
   AlertTriangle,
   ArrowRight,
   Sparkles,

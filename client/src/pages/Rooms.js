@@ -10,10 +10,8 @@ import {
   List,
   Globe,
   Lock,
-  Clock,
   Users,
   TrendingUp,
-  Sparkles,
   ChevronDown,
   MessageSquare,
 } from 'lucide-react';

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   ArrowLeft,
   Users,
@@ -13,22 +13,18 @@ import {
   Info,
   Shield,
   Crown,
-  Circle,
-  AlertTriangle,
   CheckCircle,
   XCircle,
-  Search,
   BellOff,
   Flag,
   LogOut,
   Copy,
-  ExternalLink,
   Sparkles,
   Zap,
   Brain,
   Lock,
 } from 'lucide-react';
-import { Button, Badge, Card, Avatar, Spinner, cn } from '../components/ui';
+import { Button, Badge, Avatar, Spinner, cn } from '../components/ui';
 import { ChatMessage, AIWarningToast } from '../components/Chat';
 import { useAuthStore } from '../store/authStore';
 import { useSocketStore } from '../store/socketStore';
@@ -38,10 +34,8 @@ import toast from 'react-hot-toast';
 const RoomDetail = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const { user } = useAuthStore();
   const {
-    socket,
     isConnected,
     connectionStatus,
     joinRoom,
@@ -52,11 +46,9 @@ const RoomDetail = () => {
     requestSpeakerAccess,
     approveSpeakerRequest,
     rejectSpeakerRequest,
-    reactToMessage,
     messages: roomMessages,
     typingUsers: roomTypingUsers,
     onlineUsers: roomOnlineUsers,
-    notifications,
     speakerRequests,
     roomState,
   } = useSocketStore();
@@ -120,9 +112,9 @@ const RoomDetail = () => {
     return () => window.removeEventListener('ai-warning', handleAiWarning);
   }, []);
 
-  const fallbackMessages = initialMessages?.messages || [];
+  const fallbackMessages = initialMessages?.messages;
   const messages = useMemo(
-    () => (roomMessages?.length ? roomMessages : fallbackMessages),
+    () => (roomMessages?.length ? roomMessages : fallbackMessages || []),
     [roomMessages, fallbackMessages]
   );
   const typingUsers = roomTypingUsers || [];

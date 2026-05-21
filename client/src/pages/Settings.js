@@ -1,15 +1,12 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import {
   User,
   Bell,
   Shield,
   Palette,
-  Globe,
   Key,
-  CreditCard,
-  HelpCircle,
   LogOut,
   Camera,
   Save,
@@ -23,13 +20,12 @@ import {
   EyeOff,
   Sparkles,
 } from 'lucide-react';
-import { Button, Card, Badge, Avatar, cn } from '../components/ui';
+import { Button, Card, Avatar, cn } from '../components/ui';
 import { useAuthStore } from '../store/authStore';
 import { userAPI } from '../services/api';
 import toast from 'react-hot-toast';
 
 const Settings = () => {
-  const queryClient = useQueryClient();
   const { user, logout, updateUser } = useAuthStore();
   const [activeSection, setActiveSection] = useState('profile');
   const [showPassword, setShowPassword] = useState(false);

@@ -3,7 +3,6 @@ import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import {
-  ArrowLeft,
   Edit3,
   Settings,
   MessageSquare,
@@ -12,13 +11,10 @@ import {
   Calendar,
   MapPin,
   LinkIcon,
-  Twitter,
-  Github,
   Mail,
   Shield,
   Star,
   TrendingUp,
-  Award,
   Target,
   Zap,
   BarChart2,

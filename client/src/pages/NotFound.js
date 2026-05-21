@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Home, ArrowLeft, Search, MessageSquare } from 'lucide-react';
+import { Home, MessageSquare } from 'lucide-react';
 import { Button } from '../components/ui';
 
 const NotFound = () => {

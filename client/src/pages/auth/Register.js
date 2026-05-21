@@ -223,9 +223,9 @@ const Register = () => {
       
       <p className="mt-6 text-center text-xs text-dark-500">
         By creating an account, you agree to our{' '}
-        <a href="#" className="text-primary-400 hover:underline">Terms of Service</a>
+        <button type="button" className="text-primary-400 hover:underline">Terms of Service</button>
         {' '}and{' '}
-        <a href="#" className="text-primary-400 hover:underline">Privacy Policy</a>
+        <button type="button" className="text-primary-400 hover:underline">Privacy Policy</button>
       </p>
       
       <Divider className="my-6" />

@@ -5,15 +5,10 @@ import {
   Zap,
   Shield,
   Brain,
-  MessageSquare,
   Users,
   CheckCircle2,
   ArrowRight,
   Play,
-  Star,
-  TrendingUp,
-  Globe,
-  Lock,
   Sparkles,
   BarChart3,
   MessageCircle,
@@ -420,10 +415,10 @@ const Landing = () => {
             </div>
             
             <div className="flex items-center gap-8 text-sm text-dark-400">
-              <a href="#" className="hover:text-white transition-colors">Privacy</a>
-              <a href="#" className="hover:text-white transition-colors">Terms</a>
-              <a href="#" className="hover:text-white transition-colors">Contact</a>
-              <a href="#" className="hover:text-white transition-colors">API</a>
+              <button type="button" className="hover:text-white transition-colors">Privacy</button>
+              <button type="button" className="hover:text-white transition-colors">Terms</button>
+              <button type="button" className="hover:text-white transition-colors">Contact</button>
+              <button type="button" className="hover:text-white transition-colors">API</button>
             </div>
             
             <p className="text-sm text-dark-500">
