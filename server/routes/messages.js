@@ -189,6 +189,7 @@ router.put('/:messageId', asyncHandler(async (req, res) => {
   }
 
   const moderationDecision = moderationService.detectProfanity(content);
+  let moderationFallbackNotice = null;
 
   if (moderationDecision.blocked) {
     await moderationService.recordModerationDecision({
@@ -212,32 +213,8 @@ router.put('/:messageId', asyncHandler(async (req, res) => {
       content: content.trim(),
       roomId: room.roomId,
       userId: req.userId,
+      aiServerUrl: process.env.AI_SERVER_URL,
     });
-
-    if (aiAnalysis.pendingReview) {
-      await ModerationLog.create({
-        targetUser: req.userId,
-        room: room._id,
-        message: message._id,
-        action: 'manual-review',
-        severity: 'high',
-        source: 'ai',
-        details: {
-          originalContent: content.trim(),
-          normalizedContent: moderationDecision.normalizedContent,
-          matchedTerms: moderationDecision.matchedTerms,
-          filterEngine: 'ai-moderator',
-          blockedReason: aiAnalysis.reason,
-          reason: aiAnalysis.reason,
-        },
-      });
-
-      return res.status(202).json({
-        message: 'Edit queued for moderation review',
-        status: 'pending_review',
-        moderation: aiAnalysis,
-      });
-    }
 
     if (aiAnalysis.approved === false) {
       await moderationService.recordModerationDecision({
@@ -259,6 +236,19 @@ router.put('/:messageId', asyncHandler(async (req, res) => {
 
       throw new AppError(aiAnalysis.reason || 'Edited message blocked by AI moderator.', 400);
     }
+
+    if (aiAnalysis.pendingReview || aiAnalysis.degraded || aiAnalysis.aiUnavailable) {
+      await moderationService.logModerationDegradation({
+        room,
+        user: req.user,
+        content: content.trim(),
+        normalizedContent: moderationDecision.normalizedContent,
+        reason: aiAnalysis.reason || 'AI moderation unavailable. Edit allowed under local moderation fallback.',
+        source: aiAnalysis.aiUnavailable ? 'system' : 'ai',
+        aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
+      });
+      moderationFallbackNotice = aiAnalysis;
+    }
   }
 
   // Save edit history only after moderation passes
@@ -273,7 +263,10 @@ router.put('/:messageId', asyncHandler(async (req, res) => {
 
   await message.populate('sender', 'username profile.avatar');
 
-  res.json({ message });
+  res.json({
+    message,
+    moderation: moderationFallbackNotice,
+  });
 }));
 
 module.exports = router;

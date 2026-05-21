@@ -18,7 +18,7 @@ const lastMessageState = new Map();
 const processedEvents = new Map(); // userId -> Map(clientMessageId -> messageId)
 const debugSocket = (...args) => console.debug('[socket]', ...args);
 
-const AI_SERVER_URL = process.env.AI_SERVER_URL || 'http://localhost:8000';
+const AI_SERVER_URL = process.env.AI_SERVER_URL || '';
 const SOCKET_LIMITS = {
   connectionWindowMs: Number(process.env.SOCKET_CONNECTION_WINDOW_MS || 60_000),
   connectionMaxAttempts: Number(process.env.SOCKET_CONNECTION_MAX_ATTEMPTS || 12),
@@ -492,7 +492,7 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       aiAnalysis = await analyzeMessage(content, room.roomId, socket.userId);
     }
 
-    if (aiAnalysis.pendingReview || aiAnalysis.approved === false) {
+    if (aiAnalysis.approved === false) {
       const moderationOutcome = await moderationService.recordModerationDecision({
         room,
         user: socket.user,
@@ -504,7 +504,6 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
         source: 'ai',
         reason: aiAnalysis.reason || 'Message blocked by AI moderator.',
         filterEngine: 'ai-moderator',
-        countWarning: false,
         aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
         factCheckResults: aiAnalysis.factCheck || null,
       });
@@ -523,9 +522,34 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
         userId: socket.userId,
         reason: response.reason,
         pendingReview: response.pendingReview,
+        blocked: true,
       });
       debugSocket('message blocked by ai moderator', socket.user.username, room.roomId, clientMessageId);
       return;
+    }
+
+    if (aiAnalysis.pendingReview || aiAnalysis.degraded || aiAnalysis.aiUnavailable) {
+      await moderationService.logModerationDegradation({
+        room,
+        user: socket.user,
+        content,
+        normalizedContent,
+        reason: aiAnalysis.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
+        source: aiAnalysis.aiUnavailable ? 'system' : 'ai',
+        aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
+      });
+
+      const warning = {
+        userId: socket.userId,
+        roomId: room.roomId,
+        reason: aiAnalysis.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
+        degraded: true,
+        pendingReview: Boolean(aiAnalysis.pendingReview),
+        aiUnavailable: Boolean(aiAnalysis.aiUnavailable),
+      };
+
+      socket.emit('moderation:warning', warning);
+      debugSocket('message allowed with degraded ai moderation', socket.user.username, room.roomId, clientMessageId);
     }
 
     const message = await Message.create({

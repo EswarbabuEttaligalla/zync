@@ -59,7 +59,13 @@ test('slow mode blocks immediate repeat messages', () => {
   assert.equal(second.allowed, false);
 });
 
-test('AI timeout returns pending review rather than auto-approve', async (t) => {
+test('AI timeout fails open while keeping moderation logging intact', async (t) => {
+  const previousEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+  };
+
+  process.env.NODE_ENV = 'production';
+
   const originalPost = axios.post;
   axios.post = async () => {
     throw new Error('timeout');
@@ -67,6 +73,7 @@ test('AI timeout returns pending review rather than auto-approve', async (t) => 
 
   t.after(() => {
     axios.post = originalPost;
+    process.env.NODE_ENV = previousEnv.NODE_ENV;
   });
 
   const result = await moderationService.runAiModeration({
@@ -74,12 +81,37 @@ test('AI timeout returns pending review rather than auto-approve', async (t) => 
     roomId: 'room-ai-1',
     userId: 'user-ai-1',
     timeout: 1,
-    aiServerUrl: 'http://127.0.0.1:9',
+    aiServerUrl: 'https://zync-backend-2hmu.onrender.com',
   });
 
-  assert.equal(result.approved, false);
-  assert.equal(result.pendingReview, true);
-  assert.equal(result.status, 'pending_review');
+  assert.equal(result.approved, true);
+  assert.equal(result.pendingReview, false);
+  assert.equal(result.aiUnavailable, true);
+  assert.equal(result.degraded, true);
+  assert.equal(result.status, 'degraded');
+});
+
+test('production local ai endpoint is treated as unavailable fallback', async (t) => {
+  const previousEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+  };
+
+  process.env.NODE_ENV = 'production';
+
+  t.after(() => {
+    process.env.NODE_ENV = previousEnv.NODE_ENV;
+  });
+
+  const result = await moderationService.runAiModeration({
+    content: 'hello',
+    roomId: 'room-ai-2',
+    userId: 'user-ai-2',
+    aiServerUrl: 'http://localhost:8000',
+  });
+
+  assert.equal(result.approved, true);
+  assert.equal(result.aiUnavailable, true);
+  assert.equal(result.degraded, true);
 });
 
 test('admin client uses backend moderation routes', () => {

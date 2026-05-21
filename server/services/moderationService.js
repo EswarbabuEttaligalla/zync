@@ -105,6 +105,8 @@ const INVISIBLE_RE = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u
 const MUTE_AFTER_WARNINGS = Number(process.env.MUTE_AFTER_WARNINGS || 3);
 const TEMP_MUTE_MINUTES = Number(process.env.TEMP_MUTE_MINUTES || 15);
 
+const LOCAL_ENDPOINT_RE = /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i;
+
 const customFilter = new Filter({ placeHolder: '*' });
 
 try {
@@ -166,6 +168,54 @@ const normalizeText = (input = '') => {
     .trim();
 };
 
+const normalizeServerUrl = (value) => {
+  if (!value || typeof value !== 'string') {
+    return '';
+  }
+
+  return value.trim().replace(/\/+$/, '');
+};
+
+const isLocalEndpoint = (value) => LOCAL_ENDPOINT_RE.test(normalizeServerUrl(value));
+
+const resolveAiServerUrl = (providedUrl) => {
+  const configuredUrl = normalizeServerUrl(providedUrl || process.env.AI_SERVER_URL || '');
+
+  if (!configuredUrl) {
+    return process.env.NODE_ENV === 'production' ? null : 'http://localhost:8000';
+  }
+
+  if (process.env.NODE_ENV === 'production' && isLocalEndpoint(configuredUrl)) {
+    return null;
+  }
+
+  return configuredUrl;
+};
+
+const buildAiUnavailableResult = ({ reason, error, degradedReason = 'ai-unavailable' }) => {
+  console.warn('[moderation] AI moderation degraded', {
+    reason,
+    degradedReason,
+    error: error?.message || null,
+  });
+
+  return {
+    approved: true,
+    pendingReview: false,
+    degraded: true,
+    aiUnavailable: true,
+    status: 'degraded',
+    reason,
+    message: reason,
+    toxicityScore: 0,
+    hasFallacy: false,
+    fallacies: [],
+    factCheckRequired: false,
+    sentiment: 'neutral',
+    error: error?.message || null,
+  };
+};
+
 const buildFlexiblePattern = (term) => {
   const tokens = term
     .toLowerCase()
@@ -222,9 +272,18 @@ const detectProfanity = (content = '') => {
   };
 };
 
-const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServerUrl = process.env.AI_SERVER_URL || 'http://localhost:8000' }) => {
+const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServerUrl }) => {
+  const resolvedAiServerUrl = resolveAiServerUrl(aiServerUrl);
+
+  if (!resolvedAiServerUrl) {
+    return buildAiUnavailableResult({
+      reason: 'AI moderation unavailable. Message allowed under local moderation fallback.',
+      degradedReason: 'ai-missing-or-local-endpoint',
+    });
+  }
+
   try {
-    const response = await axios.post(`${aiServerUrl}/api/analyze`, {
+    const response = await axios.post(`${resolvedAiServerUrl}/api/analyze`, {
       content,
       roomId,
       userId,
@@ -234,28 +293,20 @@ const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServ
     });
 
     const analysis = response.data || {};
-    const approved = analysis.approved !== false && !analysis.pendingReview;
+    const approved = analysis.approved !== false;
 
     return {
       ...analysis,
       approved,
-      pendingReview: false,
-      status: approved ? 'approved' : 'blocked',
+      pendingReview: Boolean(analysis.pendingReview),
+      status: approved ? (analysis.pendingReview ? 'review_queued' : 'approved') : 'blocked',
     };
   } catch (error) {
-    return {
-      approved: false,
-      pendingReview: true,
-      status: 'pending_review',
-      reason: 'AI moderation temporarily unavailable. Message queued for review.',
-      message: 'AI moderation temporarily unavailable. Message queued for review.',
-      toxicityScore: 0,
-      hasFallacy: false,
-      fallacies: [],
-      factCheckRequired: false,
-      sentiment: 'neutral',
-      error: error.message,
-    };
+    return buildAiUnavailableResult({
+      reason: 'AI moderation unavailable. Message allowed under local moderation fallback.',
+      error,
+      degradedReason: error.code || error.cause?.code || 'ai-request-failed',
+    });
   }
 };
 
@@ -387,11 +438,31 @@ const recordModerationDecision = async ({
   };
 };
 
+const logModerationDegradation = async ({ room, user, userId, content, normalizedContent, reason, source = 'system', aiScores = {}, notes = null }) => recordModerationDecision({
+  room,
+  user,
+  userId,
+  content,
+  normalizedContent,
+  matchedTerms: [],
+  severity: 'low',
+  action: 'ai-override',
+  source,
+  reason,
+  filterEngine: 'ai-fallback',
+  aiScores,
+  notes: notes || reason,
+  countWarning: false,
+});
+
 module.exports = {
   normalizeText,
   detectProfanity,
+  resolveAiServerUrl,
+  isLocalEndpoint,
   runAiModeration,
   clearExpiredMute,
   applyViolationAndMute,
   recordModerationDecision,
+  logModerationDegradation,
 };
