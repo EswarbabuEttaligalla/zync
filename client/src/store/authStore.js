@@ -2,6 +2,26 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import api from '../services/api';
 
+const getErrorMessage = (error, fallbackMessage) => {
+  const responseData = error?.response?.data;
+  const details = Array.isArray(responseData?.details)
+    ? responseData.details.map((item) => (typeof item === 'string' ? item : item?.message)).filter(Boolean).join(', ')
+    : typeof responseData?.details === 'string'
+      ? responseData.details
+      : '';
+
+  return responseData?.error || responseData?.message || details || error?.message || fallbackMessage;
+};
+
+const logAuthError = (action, error, payload) => {
+  console.error(`[auth] ${action} failed`, {
+    status: error?.response?.status,
+    data: error?.response?.data,
+    url: error?.config?.url,
+    payload,
+  });
+};
+
 export const useAuthStore = create(
   persist(
     (set, get) => ({
@@ -17,8 +37,10 @@ export const useAuthStore = create(
       },
 
       login: async (email, password) => {
+        const loginIdentifier = String(email).trim();
+
         try {
-          const response = await api.post('/auth/login', { email: String(email).trim(), password });
+          const response = await api.post('/auth/login', { email: loginIdentifier, password });
           const { user, accessToken, refreshToken } = response.data;
 
           set({
@@ -31,9 +53,10 @@ export const useAuthStore = create(
           api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
           return { success: true };
         } catch (error) {
+          logAuthError('login', error, { email: loginIdentifier });
           return {
             success: false,
-            error: error.response?.data?.error || 'Login failed',
+            error: getErrorMessage(error, 'Login failed'),
           };
         }
       },
@@ -53,9 +76,13 @@ export const useAuthStore = create(
           api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
           return { success: true };
         } catch (error) {
+          logAuthError('register', error, {
+            username: userData?.username,
+            email: userData?.email,
+          });
           return {
             success: false,
-            error: error.response?.data?.error || 'Registration failed',
+            error: getErrorMessage(error, 'Registration failed'),
           };
         }
       },
@@ -112,6 +139,11 @@ export const useAuthStore = create(
               });
               return;
             } catch (refreshError) {
+              console.error('[auth] refresh during checkAuth failed', {
+                status: refreshError?.response?.status,
+                data: refreshError?.response?.data,
+                url: refreshError?.config?.url,
+              });
               // Refresh failed, will fall through to logout
             }
           }

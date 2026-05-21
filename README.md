@@ -122,8 +122,8 @@ CLIENT_URL=http://localhost:3000
 
 ### Client (.env)
 ```env
-REACT_APP_API_URL=http://localhost:5000/api
-REACT_APP_SOCKET_URL=http://localhost:5000
+REACT_APP_API_URL=https://zync-backend-2hmu.onrender.com
+REACT_APP_SOCKET_URL=https://zync-backend-2hmu.onrender.com
 REACT_APP_AI_ENABLED=true
 ```
 

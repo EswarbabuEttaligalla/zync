@@ -1,6 +1,25 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const PROD_API_URL = 'https://zync-backend-2hmu.onrender.com/api';
+
+const normalizeUrl = (value) => {
+  if (!value) return '';
+  return value.trim().replace(/\/+$/, '');
+};
+
+const getApiBaseUrl = () => {
+  const configuredUrl = normalizeUrl(process.env.REACT_APP_API_URL);
+
+  if (configuredUrl) {
+    return configuredUrl.endsWith('/api') ? configuredUrl : `${configuredUrl}/api`;
+  }
+
+  return process.env.NODE_ENV === 'production'
+    ? PROD_API_URL
+    : 'http://localhost:5000/api';
+};
+
+const API_URL = getApiBaseUrl();
 
 const api = axios.create({
   baseURL: API_URL,
@@ -65,6 +84,11 @@ api.interceptors.response.use(
           return api(originalRequest);
         }
       } catch (refreshError) {
+        console.error('[api] token refresh failed', {
+          status: refreshError?.response?.status,
+          data: refreshError?.response?.data,
+          url: refreshError?.config?.url,
+        });
         // Clear auth and redirect to login
         localStorage.removeItem('zync-auth');
         window.location.href = '/login';

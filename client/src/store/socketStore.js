@@ -2,7 +2,24 @@ import { create } from 'zustand';
 import { io } from 'socket.io-client';
 import { useAuthStore } from './authStore';
 
-const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
+const PROD_SOCKET_URL = 'https://zync-backend-2hmu.onrender.com';
+
+const normalizeUrl = (value) => {
+  if (!value) return '';
+  return value.trim().replace(/\/+$/, '');
+};
+
+const SOCKET_URL = (() => {
+  const configuredUrl = normalizeUrl(process.env.REACT_APP_SOCKET_URL);
+
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  return process.env.NODE_ENV === 'production'
+    ? PROD_SOCKET_URL
+    : 'http://localhost:5000';
+})();
 
 const mergeById = (messages) => {
   const map = new Map();

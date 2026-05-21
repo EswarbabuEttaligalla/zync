@@ -35,11 +35,31 @@ if (!process.env.JWT_SECRET || !process.env.JWT_SECRET.trim()) {
 const app = express();
 const server = http.createServer(app);
 
-const getAllowedOrigins = () => {
-  const envOrigins = (process.env.CLIENT_URL || '')
+const normalizeOrigin = (origin) => {
+  if (!origin || typeof origin !== 'string') return null;
+
+  try {
+    return new URL(origin).origin;
+  } catch (error) {
+    return origin.trim().replace(/\/+$/, '');
+  }
+};
+
+const parseOriginList = (...values) => Array.from(new Set(values.flatMap((value) => {
+  if (!value) return [];
+  return String(value)
     .split(',')
-    .map((origin) => origin.trim())
+    .map((origin) => normalizeOrigin(origin))
     .filter(Boolean);
+})));
+
+const getAllowedOrigins = () => {
+  const envOrigins = parseOriginList(
+    process.env.CLIENT_URL,
+    process.env.FRONTEND_URL,
+    process.env.ALLOWED_ORIGINS,
+    process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+  );
 
   return Array.from(new Set([
     'http://localhost:3000',
@@ -49,11 +69,65 @@ const getAllowedOrigins = () => {
 };
 
 const allowedOrigins = getAllowedOrigins();
+const allowedOriginSet = new Set(allowedOrigins);
+const allowedProductionOriginPattern = /^https:\/\/[a-z0-9-]+\.vercel\.(app|dev)$/i;
+
+const isAllowedOrigin = (origin) => {
+  const normalized = normalizeOrigin(origin);
+
+  if (!normalized) {
+    return true;
+  }
+
+  if (allowedOriginSet.has(normalized)) {
+    return true;
+  }
+
+  if (process.env.NODE_ENV === 'production' && allowedProductionOriginPattern.test(normalized)) {
+    return true;
+  }
+
+  return false;
+};
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (isAllowedOrigin(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn('[cors] blocked origin', {
+      origin: normalizeOrigin(origin),
+      method: 'CORS',
+      allowedOrigins,
+    });
+
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
 
 // Socket.io setup with CORS
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (!origin || isAllowedOrigin(origin)) {
+        return callback(null, true);
+      }
+
+      console.warn('[socket-cors] blocked origin', {
+        origin: normalizeOrigin(origin),
+        allowedOrigins,
+      });
+
+      return callback(null, false);
+    },
     methods: ['GET', 'POST'],
     credentials: true
   },
@@ -65,10 +139,22 @@ const io = new Server(server, {
 
 // Security middleware
 app.use(helmet());
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
-}));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin && !isAllowedOrigin(origin)) {
+    console.warn('[cors] request origin not in allowlist', {
+      origin: normalizeOrigin(origin),
+      method: req.method,
+      path: req.originalUrl,
+    });
+  }
+
+  next();
+});
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Rate limiting
 const limiter = rateLimit({
