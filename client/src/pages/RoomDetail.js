@@ -23,6 +23,10 @@ import {
   Zap,
   Brain,
   Lock,
+  Clock3,
+  UserPlus,
+  Check,
+  X,
 } from 'lucide-react';
 import { Button, Badge, Avatar, Spinner, cn } from '../components/ui';
 import { ChatMessage, AIWarningToast } from '../components/Chat';
@@ -154,6 +158,7 @@ const RoomDetail = () => {
   });
   const isMuted = Boolean(currentParticipant?.isMuted && (!currentParticipant.mutedUntil || new Date(currentParticipant.mutedUntil) > new Date()));
   const pendingSpeakerRequest = speakerRequests.some((request) => request.user?._id?.toString?.() === user?._id?.toString?.() || request.user?.id?.toString?.() === user?._id?.toString?.());
+  const pendingRequestCount = speakerRequests.length;
 
   const groupedMessages = useMemo(() => messages.map((msg, index) => {
     const previous = messages[index - 1];
@@ -245,10 +250,32 @@ const RoomDetail = () => {
 
   const isHost = room.host?._id === user?._id;
   const isModerator = room.moderators?.some(m => m._id === user?._id);
+  const currentRole = roomState?.role || currentParticipant?.role || (isHost ? 'owner' : isModerator ? 'moderator' : 'viewer');
+  const canManageRequests = isHost || isModerator;
   const canRequestSpeaker = roomState?.canRequestSpeaker;
   const roomRole = roomState?.role || (isHost ? 'owner' : isModerator ? 'moderator' : 'viewer');
   const canSendMessage = roomState?.canSendMessage ?? true;
   const canRequestSpeakerNow = canRequestSpeaker && !pendingSpeakerRequest;
+
+  const handleApproveRequest = async (request) => {
+    const requestId = request.id || request._id || request.requestId;
+    const response = await approveSpeakerRequest(roomId, requestId, 'Approved from the room panel');
+    if (response?.ok) {
+      toast.success('Speaker request approved');
+    } else {
+      toast.error(response?.error || 'Unable to approve request');
+    }
+  };
+
+  const handleRejectRequest = async (request) => {
+    const requestId = request.id || request._id || request.requestId;
+    const response = await rejectSpeakerRequest(roomId, requestId, 'Rejected from the room panel');
+    if (response?.ok) {
+      toast.success('Speaker request rejected');
+    } else {
+      toast.error(response?.error || 'Unable to reject request');
+    }
+  };
 
   return (
     <div className="flex h-[calc(100vh-6rem)] -m-6 bg-dark-950">
@@ -488,7 +515,8 @@ const RoomDetail = () => {
                   else toast.error(response?.error || 'Unable to send request');
                 }}
               >
-                {pendingSpeakerRequest ? 'Request Pending' : 'Request Access'}
+                <UserPlus className="w-4 h-4" />
+                {pendingSpeakerRequest ? 'Request Pending' : 'Request to Speak'}
               </Button>
             </div>
           )}
@@ -517,30 +545,89 @@ const RoomDetail = () => {
             </div>
 
             <div className="p-4 space-y-2 overflow-y-auto h-[calc(100%-60px)] scrollbar-thin">
-              {isHost && speakerRequests.length > 0 && (
+              {canManageRequests && (
                 <div className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3">
-                  <h4 className="text-xs font-medium text-amber-400 uppercase mb-2">Speaker Requests</h4>
-                  <div className="space-y-2">
-                    {speakerRequests.map((request) => (
-                      <div key={request.id} className="rounded-xl border border-dark-700 bg-dark-800/60 p-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-medium text-white truncate">{request.user?.username || 'User'}</span>
-                          <span className="text-[11px] text-dark-400">pending</span>
-                        </div>
-                        <p className="mt-1 text-xs text-dark-400">{request.message || 'No message provided'}</p>
-                        <div className="mt-3 flex gap-2">
-                          <Button size="sm" onClick={async () => approveSpeakerRequest(roomId, request.id)}>
-                            Approve
-                          </Button>
-                          <Button size="sm" variant="secondary" onClick={async () => rejectSpeakerRequest(roomId, request.id, 'Not enough room time right now')}>
-                            Reject
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-xs font-medium text-amber-400 uppercase">Pending Requests</h4>
+                      <p className="text-[11px] text-dark-400">Live approval queue for speakers and room participation.</p>
+                    </div>
+                    <Badge variant="warning" size="sm">{pendingRequestCount}</Badge>
                   </div>
+
+                  {speakerRequests.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-dark-700 bg-dark-900/40 p-3 text-sm text-dark-400">
+                      No pending requests.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {speakerRequests.map((request) => {
+                        const requestId = request.id || request._id || request.requestId;
+                        const requester = request.user || {};
+                        const requesterId = requester._id || requester.id || requester.userId;
+                        const requesterRole = roomState?.participants?.find((participant) => {
+                          const participantId = participant.id || participant._id || participant.userId || participant.user?._id || participant.user?.id;
+                          return participantId?.toString?.() === requesterId?.toString?.();
+                        })?.role || 'viewer';
+
+                        return (
+                          <div key={requestId} className="rounded-xl border border-dark-700 bg-dark-800/60 p-3">
+                            <div className="flex items-start gap-3">
+                              <Avatar
+                                src={requester.profile?.avatar}
+                                alt={requester.username || 'Requester'}
+                                size="sm"
+                                status="online"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-sm font-medium text-white truncate">{requester.username || 'User'}</span>
+                                  <Badge variant={requesterRole === 'viewer' ? 'default' : 'primary'} size="sm">
+                                    {requesterRole}
+                                  </Badge>
+                                </div>
+                                <div className="mt-1 flex items-center gap-2 text-[11px] text-dark-400">
+                                  <Clock3 className="w-3 h-3" />
+                                  <span>
+                                    {request.createdAt ? new Date(request.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Just now'}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-xs text-dark-300">{request.message || 'No message provided'}</p>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 flex items-center justify-end gap-2">
+                              <Button size="sm" variant="secondary" onClick={() => handleRejectRequest(request)} icon={X}>
+                                Reject
+                              </Button>
+                              <Button size="sm" onClick={() => handleApproveRequest(request)} icon={Check}>
+                                Approve
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
+
+              <div className="rounded-2xl border border-dark-700 bg-dark-900/40 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-medium text-dark-300 uppercase">Owner Controls</h4>
+                    <p className="text-[11px] text-dark-500">Realtime role sync and moderation actions.</p>
+                  </div>
+                  <Badge variant={currentRole === 'owner' ? 'warning' : currentRole === 'moderator' ? 'primary' : 'default'} size="sm">
+                    {currentRole}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[11px] text-dark-400">
+                  <span className="rounded-full border border-dark-700 px-2 py-1">Approve requests</span>
+                  <span className="rounded-full border border-dark-700 px-2 py-1">Mute users</span>
+                  <span className="rounded-full border border-dark-700 px-2 py-1">Promote participants</span>
+                </div>
+              </div>
 
               {/* Host */}
               {room.host && (
@@ -606,6 +693,7 @@ const RoomDetail = () => {
                         {participants.map((participant) => {
                           const participantId = participant.user?._id || participant.id || participant.userId;
                           const isOnline = onlineUsers.some(u => (u.id || u._id)?.toString?.() === participantId?.toString?.());
+                          const roleBadge = participant.role || role;
                           return (
                             <div
                               key={participantId}
@@ -622,8 +710,8 @@ const RoomDetail = () => {
                                   <span className="font-medium text-white truncate block">
                                     {participant.user?.username}
                                   </span>
-                                  <Badge size="sm" variant={role === 'owner' ? 'warning' : role === 'moderator' ? 'primary' : 'default'}>
-                                    {roleLabel}
+                                  <Badge size="sm" variant={roleBadge === 'owner' ? 'warning' : roleBadge === 'moderator' ? 'primary' : roleBadge === 'participant' ? 'success' : 'default'}>
+                                    {roleBadge}
                                   </Badge>
                                 </div>
                                 <span className="text-xs text-dark-400">
