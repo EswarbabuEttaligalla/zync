@@ -60,6 +60,7 @@ const RoomDetail = () => {
   const [showSidebar, setShowSidebar] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
   const [aiWarning, setAiWarning] = useState(null);
+  const [moderationStatus, setModerationStatus] = useState(null);
 
   // Fetch room data
   const { data: roomData, isLoading } = useQuery({
@@ -97,19 +98,47 @@ const RoomDetail = () => {
 
   // Set initial messages
   useEffect(() => {
-    const handleAiWarning = (event) => {
+    const handleBlockedModeration = (event) => {
       const detail = event.detail || {};
+      if (detail.state === 'AI_UNAVAILABLE' || detail.state === 'PENDING_REVIEW') {
+        setModerationStatus({
+          state: detail.state,
+          reason: detail.reason || detail.message || 'Moderation status updated.',
+          blocked: false,
+        });
+        window.setTimeout(() => setModerationStatus(null), 6000);
+        return;
+      }
+
       setAiWarning({
-        type: detail.type || 'toxicity',
+        type: detail.state === 'PROFANITY_CONFIRMED' ? 'blocked' : 'toxicity',
         message: detail.message || detail.reason || 'Message blocked due to inappropriate language.',
         suggestions: detail.suggestions || ['Please rephrase your message respectfully.'],
-        toxicityScore: detail.toxicityScore || 1,
+        toxicityScore: detail.toxicityScore ?? 0,
+        fallacies: detail.fallacies || [],
+        state: detail.state,
       });
       window.setTimeout(() => setAiWarning(null), 5000);
     };
 
-    window.addEventListener('ai-warning', handleAiWarning);
-    return () => window.removeEventListener('ai-warning', handleAiWarning);
+    const handleModerationStatus = (event) => {
+      const detail = event.detail || {};
+      if (detail.state === 'AI_UNAVAILABLE' || detail.state === 'PENDING_REVIEW') {
+        setModerationStatus({
+          state: detail.state,
+          reason: detail.reason || detail.message || 'Moderation status updated.',
+          blocked: false,
+        });
+        window.setTimeout(() => setModerationStatus(null), 6000);
+      }
+    };
+
+    window.addEventListener('ai-warning', handleBlockedModeration);
+    window.addEventListener('moderation:status', handleModerationStatus);
+    return () => {
+      window.removeEventListener('ai-warning', handleBlockedModeration);
+      window.removeEventListener('moderation:status', handleModerationStatus);
+    };
   }, []);
 
   const fallbackMessages = initialMessages?.messages;
@@ -269,6 +298,15 @@ const RoomDetail = () => {
               <span className="text-sm text-emerald-400">AI Active</span>
             </div>
 
+            {moderationStatus && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-500/10 border border-slate-500/20 rounded-full">
+                <Shield className="w-4 h-4 text-slate-300" />
+                <span className="text-sm text-slate-300">
+                  {moderationStatus.state === 'AI_UNAVAILABLE' ? 'Moderation fallback active' : 'Message under review'}
+                </span>
+              </div>
+            )}
+
             <button
               onClick={() => setShowSidebar(!showSidebar)}
               className={cn(
@@ -328,7 +366,7 @@ const RoomDetail = () => {
             <AIWarningToast
               type={aiWarning.type}
               details={aiWarning.message}
-              toxicityScore={aiWarning.toxicityScore || 0}
+              toxicityScore={aiWarning.state === 'TOXIC_CONFIRMED' ? (aiWarning.toxicityScore || 0) : 0}
               fallacies={aiWarning.fallacies || []}
               suggestions={aiWarning.suggestions || []}
               onDismiss={() => setAiWarning(null)}

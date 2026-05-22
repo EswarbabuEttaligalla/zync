@@ -107,6 +107,15 @@ const TEMP_MUTE_MINUTES = Number(process.env.TEMP_MUTE_MINUTES || 15);
 
 const LOCAL_ENDPOINT_RE = /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i;
 
+const MODERATION_STATES = Object.freeze({
+  SAFE: 'SAFE',
+  PROFANITY_CONFIRMED: 'PROFANITY_CONFIRMED',
+  TOXIC_CONFIRMED: 'TOXIC_CONFIRMED',
+  SPAM_CONFIRMED: 'SPAM_CONFIRMED',
+  AI_UNAVAILABLE: 'AI_UNAVAILABLE',
+  PENDING_REVIEW: 'PENDING_REVIEW',
+});
+
 const customFilter = new Filter({ placeHolder: '*' });
 
 try {
@@ -178,6 +187,58 @@ const normalizeServerUrl = (value) => {
 
 const isLocalEndpoint = (value) => LOCAL_ENDPOINT_RE.test(normalizeServerUrl(value));
 
+const getToxicityThreshold = (value) => {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+    return parsed;
+  }
+
+  return 0.85;
+};
+
+const isConfirmedSpam = (analysis = {}) => {
+  const reason = `${analysis.reason || analysis.message || ''}`.toLowerCase();
+  return Boolean(
+    analysis.spamDetected
+    || analysis.isSpam
+    || analysis.spam
+    || analysis.floodDetected
+    || /(?:spam|flood|burst|rate limit|duplicate message)/i.test(reason)
+  );
+};
+
+const isConfirmedToxic = (analysis = {}, threshold = 0.85) => {
+  const reason = `${analysis.reason || analysis.message || ''}`.toLowerCase();
+  const toxicityScore = Number(analysis.toxicityScore);
+
+  return Boolean(
+    analysis.isToxic === true
+    || analysis.toxicity === true
+    || analysis.toxic === true
+    || analysis.confirmedToxic === true
+    || (Number.isFinite(toxicityScore) && toxicityScore >= threshold)
+    || /(?:toxic|toxicity|abuse|abusive|slur|hate|harass|harassment|bully|violent)/i.test(reason)
+  );
+};
+
+const createModerationResult = (overrides = {}) => ({
+  state: MODERATION_STATES.SAFE,
+  status: 'approved',
+  blocked: false,
+  approved: true,
+  degraded: false,
+  aiUnavailable: false,
+  pendingReview: false,
+  reason: null,
+  message: null,
+  toxicityScore: 0,
+  hasFallacy: false,
+  fallacies: [],
+  factCheckRequired: false,
+  sentiment: 'neutral',
+  ...overrides,
+});
+
 const resolveAiServerUrl = (providedUrl) => {
   const configuredUrl = normalizeServerUrl(providedUrl || process.env.AI_SERVER_URL || '');
 
@@ -199,12 +260,14 @@ const buildAiUnavailableResult = ({ reason, error, degradedReason = 'ai-unavaila
     error: error?.message || null,
   });
 
-  return {
+  return createModerationResult({
+    state: MODERATION_STATES.AI_UNAVAILABLE,
+    status: 'degraded',
     approved: true,
+    blocked: false,
     pendingReview: false,
     degraded: true,
     aiUnavailable: true,
-    status: 'degraded',
     reason,
     message: reason,
     toxicityScore: 0,
@@ -213,7 +276,7 @@ const buildAiUnavailableResult = ({ reason, error, degradedReason = 'ai-unavaila
     factCheckRequired: false,
     sentiment: 'neutral',
     error: error?.message || null,
-  };
+  });
 };
 
 const buildFlexiblePattern = (term) => {
@@ -264,6 +327,7 @@ const detectProfanity = (content = '') => {
 
   return {
     blocked: isProfane,
+    state: isProfane ? MODERATION_STATES.PROFANITY_CONFIRMED : MODERATION_STATES.SAFE,
     normalizedContent,
     matchedTerms,
     severity,
@@ -272,8 +336,9 @@ const detectProfanity = (content = '') => {
   };
 };
 
-const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServerUrl }) => {
+const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServerUrl, toxicityThreshold }) => {
   const resolvedAiServerUrl = resolveAiServerUrl(aiServerUrl);
+  const confirmedToxicityThreshold = getToxicityThreshold(toxicityThreshold);
 
   if (!resolvedAiServerUrl) {
     return buildAiUnavailableResult({
@@ -293,14 +358,37 @@ const runAiModeration = async ({ content, roomId, userId, timeout = 5000, aiServ
     });
 
     const analysis = response.data || {};
-    const approved = analysis.approved !== false;
+    const confirmedSpam = isConfirmedSpam(analysis);
+    const confirmedToxic = isConfirmedToxic(analysis, confirmedToxicityThreshold);
+    const pendingReview = Boolean(analysis.pendingReview || analysis.approved === false);
+    const blocked = confirmedSpam || confirmedToxic;
+    const moderationState = blocked
+      ? (confirmedSpam ? MODERATION_STATES.SPAM_CONFIRMED : MODERATION_STATES.TOXIC_CONFIRMED)
+      : pendingReview
+        ? MODERATION_STATES.PENDING_REVIEW
+        : MODERATION_STATES.SAFE;
 
-    return {
+    return createModerationResult({
       ...analysis,
-      approved,
-      pendingReview: Boolean(analysis.pendingReview),
-      status: approved ? (analysis.pendingReview ? 'review_queued' : 'approved') : 'blocked',
-    };
+      state: moderationState,
+      status: blocked
+        ? 'blocked'
+        : pendingReview
+          ? 'review_queued'
+          : 'approved',
+      blocked,
+      approved: !blocked,
+      pendingReview,
+      degraded: false,
+      aiUnavailable: false,
+      reason: analysis.reason || analysis.message || null,
+      message: analysis.message || analysis.reason || null,
+      toxicityScore: Number.isFinite(Number(analysis.toxicityScore)) ? Number(analysis.toxicityScore) : 0,
+      hasFallacy: Boolean(analysis.hasFallacy),
+      fallacies: Array.isArray(analysis.fallacies) ? analysis.fallacies : [],
+      factCheckRequired: Boolean(analysis.factCheckRequired),
+      sentiment: analysis.sentiment || 'neutral',
+    });
   } catch (error) {
     return buildAiUnavailableResult({
       reason: 'AI moderation unavailable. Message allowed under local moderation fallback.',
@@ -438,6 +526,110 @@ const recordModerationDecision = async ({
   };
 };
 
+const evaluateModerationDecision = async ({
+  content,
+  room,
+  user,
+  userId,
+  aiServerUrl,
+  timeout = 5000,
+  aiModerationEnabled = true,
+  toxicityThreshold,
+}) => {
+  const localDecision = detectProfanity(content);
+
+  if (localDecision.blocked) {
+    return createModerationResult({
+      state: MODERATION_STATES.PROFANITY_CONFIRMED,
+      blocked: true,
+      approved: false,
+      reason: localDecision.reason,
+      message: localDecision.reason,
+      normalizedContent: localDecision.normalizedContent,
+      matchedTerms: localDecision.matchedTerms,
+      filterEngine: localDecision.filterEngine,
+      severity: localDecision.severity,
+      aiUnavailable: false,
+      degraded: false,
+      pendingReview: false,
+      source: 'local',
+    });
+  }
+
+  if (!aiModerationEnabled) {
+    return createModerationResult({
+      state: MODERATION_STATES.SAFE,
+      reason: null,
+      message: null,
+      normalizedContent: localDecision.normalizedContent,
+      matchedTerms: localDecision.matchedTerms,
+      filterEngine: localDecision.filterEngine,
+      severity: localDecision.severity,
+      source: 'local',
+    });
+  }
+
+  const aiAnalysis = await runAiModeration({
+    content,
+    roomId: room?.roomId,
+    userId: userId || user?._id,
+    aiServerUrl,
+    timeout,
+    toxicityThreshold,
+  });
+
+  if (aiAnalysis.state === MODERATION_STATES.TOXIC_CONFIRMED || aiAnalysis.state === MODERATION_STATES.SPAM_CONFIRMED) {
+    return createModerationResult({
+      ...aiAnalysis,
+      blocked: true,
+      approved: false,
+      status: 'blocked',
+      source: 'ai',
+      normalizedContent: localDecision.normalizedContent,
+      matchedTerms: localDecision.matchedTerms,
+      filterEngine: aiAnalysis.filterEngine || 'ai-moderator',
+    });
+  }
+
+  if (aiAnalysis.state === MODERATION_STATES.AI_UNAVAILABLE) {
+    return createModerationResult({
+      ...aiAnalysis,
+      blocked: false,
+      approved: true,
+      status: 'degraded',
+      source: 'system',
+      normalizedContent: localDecision.normalizedContent,
+      matchedTerms: localDecision.matchedTerms,
+      filterEngine: localDecision.filterEngine,
+    });
+  }
+
+  if (aiAnalysis.state === MODERATION_STATES.PENDING_REVIEW) {
+    return createModerationResult({
+      ...aiAnalysis,
+      blocked: false,
+      approved: true,
+      status: 'review_queued',
+      source: 'ai',
+      normalizedContent: localDecision.normalizedContent,
+      matchedTerms: localDecision.matchedTerms,
+      filterEngine: aiAnalysis.filterEngine || 'ai-moderator',
+    });
+  }
+
+  return createModerationResult({
+    ...aiAnalysis,
+    state: MODERATION_STATES.SAFE,
+    status: 'approved',
+    blocked: false,
+    approved: true,
+    source: 'ai',
+    normalizedContent: localDecision.normalizedContent,
+    matchedTerms: localDecision.matchedTerms,
+    filterEngine: aiAnalysis.filterEngine || localDecision.filterEngine,
+  });
+};
+
 const logModerationDegradation = async ({ room, user, userId, content, normalizedContent, reason, source = 'system', aiScores = {}, notes = null }) => recordModerationDecision({
   room,
   user,
@@ -456,11 +648,13 @@ const logModerationDegradation = async ({ room, user, userId, content, normalize
 });
 
 module.exports = {
+  MODERATION_STATES,
   normalizeText,
   detectProfanity,
   resolveAiServerUrl,
   isLocalEndpoint,
   runAiModeration,
+  evaluateModerationDecision,
   clearExpiredMute,
   applyViolationAndMute,
   recordModerationDecision,

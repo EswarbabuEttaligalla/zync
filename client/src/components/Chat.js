@@ -153,9 +153,12 @@ export const ChatMessage = ({ message, isOwn, showAvatar = true }) => {
   const [showActions, setShowActions] = useState(false);
   const { reactToMessage } = useSocketStore();
 
-  const hasWarning = message.moderation?.toxicity?.flagged || message.moderation?.fallacy?.detected;
+  const moderationState = message.moderation?.state;
+  const hasConfirmedWarning = moderationState === 'TOXIC_CONFIRMED' || moderationState === 'PROFANITY_CONFIRMED';
+  const hasNeutralModerationStatus = moderationState === 'AI_UNAVAILABLE' || moderationState === 'PENDING_REVIEW';
   const isFlagged = message.isFlagged || message.status === 'blocked' || message.status === 'flagged';
-  const isPending = message.pending || message.status === 'pending';
+  const isPending = message.pending || message.status === 'pending' || message.status === 'sending';
+  const isFailed = message.status === 'failed';
 
   const reactions = [
     { type: 'agree', icon: ThumbsUp, label: 'Agree' },
@@ -211,8 +214,10 @@ export const ChatMessage = ({ message, isOwn, showAvatar = true }) => {
               ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white'
               : 'bg-dark-800 text-dark-100',
             isFlagged && 'border-2 border-red-500/50',
-            hasWarning && !isFlagged && 'border border-amber-500/50',
-            isPending && 'opacity-80 ring-1 ring-dashed ring-primary-500/40'
+            hasConfirmedWarning && !isFlagged && 'border border-amber-500/50',
+            hasNeutralModerationStatus && !isFlagged && 'border border-slate-500/40',
+            isPending && 'opacity-80 ring-1 ring-dashed ring-primary-500/40',
+            isFailed && 'opacity-80 ring-1 ring-dashed ring-red-500/40'
           )}
         >
           {isPending && (
@@ -221,16 +226,32 @@ export const ChatMessage = ({ message, isOwn, showAvatar = true }) => {
               Sending...
             </div>
           )}
+          {isFailed && (
+            <div className="mb-2 flex items-center gap-2 text-xs text-red-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-red-300" />
+              Failed to send. Please retry.
+            </div>
+          )}
           <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
           
           {/* AI Warning Indicator */}
-          {hasWarning && (
+          {hasConfirmedWarning && (
             <div className="mt-2 pt-2 border-t border-white/10">
               <div className="flex items-center gap-1.5 text-xs text-amber-400">
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span>
-                  {message.moderation?.toxicity?.flagged ? 'Potential harmful language detected' : ''}
-                  {message.moderation?.fallacy?.detected ? 'Logical fallacy detected' : ''}
+                  {moderationState === 'PROFANITY_CONFIRMED' ? 'Message blocked by profanity filter' : 'Potential harmful language detected'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {hasNeutralModerationStatus && !isFlagged && (
+            <div className="mt-2 pt-2 border-t border-white/10">
+              <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                <Shield className="w-3.5 h-3.5" />
+                <span>
+                  {moderationState === 'AI_UNAVAILABLE' ? 'Moderation running in fallback mode' : 'Message under review'}
                 </span>
               </div>
             </div>
@@ -385,7 +406,7 @@ export const AIWarningToast = ({ type, details, toxicityScore, fallacies, sugges
         </div>
         <div className="flex-1">
           <h4 className="font-semibold text-white mb-1">
-            {type === 'toxicity' ? 'Content Warning' : 'Logical Fallacy Detected'}
+            {type === 'toxicity' ? 'Content Warning' : type === 'blocked' ? 'Message Blocked' : 'Logical Fallacy Detected'}
           </h4>
           
           {type === 'toxicity' && toxicityScore > 0 && (
@@ -410,6 +431,12 @@ export const AIWarningToast = ({ type, details, toxicityScore, fallacies, sugges
                   {fallacy}
                 </Badge>
               ))}
+            </div>
+          )}
+
+          {type === 'blocked' && (
+            <div className="text-sm text-dark-400 mb-2">
+              {details}
             </div>
           )}
           

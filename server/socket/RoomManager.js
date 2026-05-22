@@ -116,6 +116,33 @@ const emitPresenceUpdate = (io, roomId) => {
   io.to(roomId.toString()).emit('presence:update', { roomId: roomId.toString(), onlineUsers, onlineCount: onlineUsers.length });
 };
 
+const emitToRoom = (io, roomId, event, payload) => {
+  const roomKey = toKey(roomId);
+  const members = roomMembers.get(roomKey);
+
+  if (members && members.size > 0) {
+    members.forEach((socketIds) => {
+      socketIds.forEach((socketId) => {
+        connectedUsers.forEach((session) => {
+          const entry = session.sockets.get(socketId);
+          if (entry?.socket) {
+            try {
+              entry.socket.emit(event, payload);
+            } catch (error) {
+              debug('emitToRoom failed', roomKey, event, error?.message || error);
+            }
+          }
+        });
+      });
+    });
+    return;
+  }
+
+  if (io?.to) {
+    io.to(roomKey).emit(event, payload);
+  }
+};
+
 module.exports = {
   getUserSessions,
   setUserSession,
@@ -127,6 +154,7 @@ module.exports = {
   getRoomTypingUsers,
   setTyping,
   emitPresenceUpdate,
+  emitToRoom,
   // exposed for debugging/tests
   __internal: { connectedUsers, roomMembers, roomTyping },
 };

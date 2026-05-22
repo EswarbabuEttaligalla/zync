@@ -209,45 +209,48 @@ router.put('/:messageId', asyncHandler(async (req, res) => {
   }
 
   if (room.settings?.aiModerationEnabled) {
-    const aiAnalysis = await moderationService.runAiModeration({
+    const moderationState = await moderationService.evaluateModerationDecision({
       content: content.trim(),
-      roomId: room.roomId,
+      room,
+      user: req.user,
       userId: req.userId,
       aiServerUrl: process.env.AI_SERVER_URL,
+      aiModerationEnabled: true,
+      toxicityThreshold: room.settings?.toxicityThreshold,
     });
 
-    if (aiAnalysis.approved === false) {
+    if ([moderationService.MODERATION_STATES.PROFANITY_CONFIRMED, moderationService.MODERATION_STATES.TOXIC_CONFIRMED, moderationService.MODERATION_STATES.SPAM_CONFIRMED].includes(moderationState.state)) {
       await moderationService.recordModerationDecision({
         room,
         user: req.user,
         content: content.trim(),
         normalizedContent: moderationDecision.normalizedContent,
         matchedTerms: moderationDecision.matchedTerms,
-        severity: aiAnalysis.severity || 'high',
+        severity: moderationState.severity || 'high',
         action: 'message-modified',
-        source: 'ai',
-        reason: aiAnalysis.reason || 'Edited message blocked by AI moderator.',
-        filterEngine: 'ai-moderator',
+        source: moderationState.state === moderationService.MODERATION_STATES.PROFANITY_CONFIRMED ? 'system' : 'ai',
+        reason: moderationState.reason || 'Edited message blocked by moderation policy.',
+        filterEngine: moderationState.filterEngine || 'ai-moderator',
         aiScores: {
-          toxicity: aiAnalysis.toxicityScore || 0,
-          fallacyConfidence: aiAnalysis.fallacies?.length ? 0.7 : 0,
+          toxicity: moderationState.toxicityScore || 0,
+          fallacyConfidence: moderationState.fallacies?.length ? 0.7 : 0,
         },
       });
 
-      throw new AppError(aiAnalysis.reason || 'Edited message blocked by AI moderator.', 400);
+      throw new AppError(moderationState.reason || 'Edited message blocked by moderation policy.', 400);
     }
 
-    if (aiAnalysis.pendingReview || aiAnalysis.degraded || aiAnalysis.aiUnavailable) {
+    if (moderationState.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE || moderationState.state === moderationService.MODERATION_STATES.PENDING_REVIEW) {
       await moderationService.logModerationDegradation({
         room,
         user: req.user,
         content: content.trim(),
         normalizedContent: moderationDecision.normalizedContent,
-        reason: aiAnalysis.reason || 'AI moderation unavailable. Edit allowed under local moderation fallback.',
-        source: aiAnalysis.aiUnavailable ? 'system' : 'ai',
-        aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
+        reason: moderationState.reason || 'AI moderation unavailable. Edit allowed under local moderation fallback.',
+        source: moderationState.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE ? 'system' : 'ai',
+        aiScores: { toxicity: moderationState.toxicityScore || 0 },
       });
-      moderationFallbackNotice = aiAnalysis;
+      moderationFallbackNotice = moderationState;
     }
   }
 

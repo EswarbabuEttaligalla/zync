@@ -91,6 +91,41 @@ test('AI timeout fails open while keeping moderation logging intact', async (t) 
   assert.equal(result.status, 'degraded');
 });
 
+test('generic ai rejection falls back to pending review instead of blocking', async (t) => {
+  const previousEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+  };
+
+  process.env.NODE_ENV = 'production';
+
+  const originalPost = axios.post;
+  axios.post = async () => ({
+    data: {
+      approved: false,
+      reason: 'Needs human review',
+    },
+  });
+
+  t.after(() => {
+    axios.post = originalPost;
+    process.env.NODE_ENV = previousEnv.NODE_ENV;
+  });
+
+  const result = await moderationService.runAiModeration({
+    content: 'hello world',
+    roomId: 'room-ai-3',
+    userId: 'user-ai-3',
+    timeout: 1,
+    aiServerUrl: 'https://zync-backend-2hmu.onrender.com',
+  });
+
+  assert.equal(result.approved, true);
+  assert.equal(result.blocked, false);
+  assert.equal(result.pendingReview, true);
+  assert.equal(result.state, moderationService.MODERATION_STATES.PENDING_REVIEW);
+  assert.equal(result.status, 'review_queued');
+});
+
 test('production local ai endpoint is treated as unavailable fallback', async (t) => {
   const previousEnv = {
     NODE_ENV: process.env.NODE_ENV,

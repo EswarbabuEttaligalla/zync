@@ -8,6 +8,9 @@ const router = express.Router();
 const Room = require('../models/Room');
 const JoinRequest = require('../models/JoinRequest');
 const Message = require('../models/Message');
+const SpeakerRequest = require('../models/SpeakerRequest');
+const RoomManager = require('../socket/RoomManager');
+const realtime = require('../services/roomRealtimeService');
 const { createRoomValidation, paginationValidation } = require('../middleware/validation');
 const { asyncHandler, AppError } = require('../middleware/errorHandler');
 
@@ -288,6 +291,44 @@ router.post('/:roomId/join', asyncHandler(async (req, res) => {
 
   await joinRequest.save();
 
+  const speakerRequest = await SpeakerRequest.findOneAndUpdate(
+    { room: room._id, user: req.userId },
+    {
+      $setOnInsert: {
+        room: room._id,
+        user: req.userId,
+        message: req.body.message || '',
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  const notification = await realtime.ensureNotification({
+    recipient: room.host,
+    room: room._id,
+    actor: req.userId,
+    type: 'join-request',
+    title: 'Join request received',
+    body: `${req.user.username} requested to join ${room.name}`,
+    data: { requestId: joinRequest._id.toString(), roomId: room.roomId, speakerRequestId: speakerRequest._id.toString() },
+  });
+
+  RoomManager.emitToUser(null, room.host.toString(), 'notification:new', notification.toObject ? notification.toObject() : notification);
+
+  const requestPayload = {
+    requestId: speakerRequest._id.toString(),
+    joinRequestId: joinRequest._id.toString(),
+    userId: req.userId.toString(),
+    username: req.user.username,
+    avatar: req.user.profile?.avatar || null,
+    message: req.body.message || '',
+    status: 'pending',
+    createdAt: joinRequest.createdAt,
+  };
+
+  RoomManager.emitToRoom(null, room.roomId, 'speaker:request', requestPayload);
+  RoomManager.emitToRoom(null, room.roomId, 'join-request:new', requestPayload);
+
   res.json({
     message: 'Join request submitted',
     joined: false,
@@ -372,11 +413,30 @@ router.post('/:roomId/requests/:requestId/approve', asyncHandler(async (req, res
   room.addParticipant(joinRequest.user, 'participant');
   await room.save();
 
+  const speakerRequest = await SpeakerRequest.findOne({ room: room._id, user: joinRequest.user, status: 'pending' });
+  if (speakerRequest) {
+    speakerRequest.approve(req.userId);
+    await speakerRequest.save();
+  }
+
   // Update user stats
   const User = require('../models/User');
   await User.findByIdAndUpdate(joinRequest.user, {
     $inc: { 'stats.roomsJoined': 1 }
   });
+
+  const state = await realtime.buildRoomState({
+    room,
+    userId: req.userId,
+    onlineUsers: [],
+    typingUsers: [],
+    pendingSpeakerRequests: await SpeakerRequest.getPendingForRoom(room._id),
+  });
+
+  RoomManager.emitToRoom(null, room.roomId, 'speaker:approved', { requestId: speakerRequest?._id?.toString() || joinRequest._id.toString(), userId: joinRequest.user.toString(), by: req.userId.toString(), status: 'approved' });
+  RoomManager.emitToRoom(null, room.roomId, 'join-request:updated', { requestId: speakerRequest?._id?.toString() || joinRequest._id.toString(), userId: joinRequest.user.toString(), by: req.userId.toString(), status: 'approved' });
+  RoomManager.emitToRoom(null, room.roomId, 'room:participant_updated', { userId: joinRequest.user.toString(), role: 'participant' });
+  RoomManager.emitToRoom(null, room.roomId, 'room:state', state);
 
   res.json({ message: 'Request approved' });
 }));
@@ -409,6 +469,15 @@ router.post('/:roomId/requests/:requestId/reject', asyncHandler(async (req, res)
 
   joinRequest.reject(req.userId, req.body.reason);
   await joinRequest.save();
+
+  const speakerRequest = await SpeakerRequest.findOne({ room: room._id, user: joinRequest.user, status: 'pending' });
+  if (speakerRequest) {
+    speakerRequest.reject(req.userId, req.body.reason || '');
+    await speakerRequest.save();
+  }
+
+  RoomManager.emitToRoom(null, room.roomId, 'speaker:rejected', { requestId: speakerRequest?._id?.toString() || joinRequest._id.toString(), userId: joinRequest.user.toString(), by: req.userId.toString(), status: 'rejected' });
+  RoomManager.emitToRoom(null, room.roomId, 'join-request:updated', { requestId: speakerRequest?._id?.toString() || joinRequest._id.toString(), userId: joinRequest.user.toString(), by: req.userId.toString(), status: 'rejected' });
 
   res.json({ message: 'Request rejected' });
 }));

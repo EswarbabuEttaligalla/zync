@@ -86,12 +86,40 @@ const getRoomOnlineUsers = (roomId) => RoomManager.getRoomOnlineUsers(roomId);
 const getRoomTypingUsers = (roomId) => RoomManager.getRoomTypingUsers(roomId);
 const emitPresenceUpdate = (io, roomId) => RoomManager.emitPresenceUpdate(io, roomId);
 
+const saveRoomWithRetry = async (roomId, mutateRoom, maxRetries = 2) => {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const room = await loadRoom(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    try {
+      await mutateRoom(room);
+      await room.save();
+      return room;
+    } catch (error) {
+      lastError = error;
+
+      if (error?.name !== 'VersionError' || attempt === maxRetries) {
+        throw error;
+      }
+
+      debugSocket('retrying stale room save', roomId, `attempt ${attempt + 1}`);
+    }
+  }
+
+  throw lastError || new Error('Failed to save room');
+};
+
 const analyzeMessage = async (content, roomId, userId) => moderationService.runAiModeration({
   content,
   roomId,
   userId,
   timeout: 5000,
   aiServerUrl: AI_SERVER_URL,
+  toxicityThreshold: 0.85,
 });
 
 const buildAndEmitRoomState = async (io, socket, room) => {
@@ -208,17 +236,24 @@ const handleRoomJoin = async (io, socket, payload = {}, ack) => {
       return socket.emit('error', { message: 'Not authorized to join this room' });
     }
 
-    if (!isMember) {
-      await ensureRoomParticipant(room, socket, 'viewer');
-    } else {
-      const record = room.getParticipantRecord(socket.userId);
+    const persistedRoom = await saveRoomWithRetry(room.roomId, async (currentRoom) => {
+      if (!isMember) {
+        currentRoom.upsertParticipant(socket.userId, {
+          role: 'viewer',
+          isOnline: true,
+          socketId: socket.id,
+          lastSeenAt: new Date(),
+        });
+        return;
+      }
+
+      const record = currentRoom.getParticipantRecord(socket.userId);
       if (record) {
         record.isOnline = true;
         record.socketId = socket.id;
         record.lastSeenAt = new Date();
-        await room.save();
       }
-    }
+    });
 
     const previousRoomId = socket.data.currentRoomId;
     if (previousRoomId && previousRoomId !== room.roomId) {
@@ -245,7 +280,7 @@ const handleRoomJoin = async (io, socket, payload = {}, ack) => {
       role: room.getMemberRole(socket.userId),
     });
 
-    const state = await buildAndEmitRoomState(io, socket, room);
+    const state = await buildAndEmitRoomState(io, socket, persistedRoom);
     if (typeof ack === 'function') {
       ack({ ok: true, ...state });
     }
@@ -301,12 +336,25 @@ const handleSpeakerRequest = async (io, socket, payload = {}, ack) => {
       ...notification.toObject(),
       recipient: room.host,
     });
-    io.to(room.roomId).emit('speaker:request', {
-      requestId: request._id,
+    const requestPayload = {
+      requestId: request._id.toString(),
       userId: socket.userId,
       username: socket.user.username,
+      avatar: socket.user.profile?.avatar || null,
       message,
-    });
+      status: 'pending',
+      createdAt: request.createdAt,
+    };
+
+    io.to(room.roomId).emit('speaker:request', requestPayload);
+    io.to(room.roomId).emit('join-request:new', requestPayload);
+    io.to(room.roomId).emit('room:state', await realtime.buildRoomState({
+      room,
+      userId: socket.userId,
+      onlineUsers: getRoomOnlineUsers(room._id),
+      typingUsers: getRoomTypingUsers(room._id),
+      pendingSpeakerRequests: await SpeakerRequest.getPendingForRoom(room._id),
+    }));
 
     if (typeof ack === 'function') ack({ ok: true, requestId: request._id });
   } catch (error) {
@@ -359,7 +407,9 @@ const handleSpeakerDecision = async (io, socket, payload = {}, approve = true, a
         data: { requestId: request._id.toString(), roomId: room.roomId },
       });
       emitToUser(io, request.user.toString(), 'notification:new', notification);
-      io.to(room.roomId).emit('speaker:approved', { requestId: request._id, userId: request.user.toString(), by: socket.userId });
+      const updatePayload = { requestId: request._id.toString(), userId: request.user.toString(), by: socket.userId.toString(), status: 'approved' };
+      io.to(room.roomId).emit('speaker:approved', updatePayload);
+      io.to(room.roomId).emit('join-request:updated', updatePayload);
     } else {
       await realtime.recordActivity({ room: room._id, actor: socket.userId, target: request.user, type: 'speaker-rejected', payload: { requestId: request._id } });
       debugSocket('participant rejected', socket.user.username, room.roomId, request.user.toString());
@@ -373,7 +423,9 @@ const handleSpeakerDecision = async (io, socket, payload = {}, approve = true, a
         data: { requestId: request._id.toString(), roomId: room.roomId },
       });
       emitToUser(io, request.user.toString(), 'notification:new', notification);
-      io.to(room.roomId).emit('speaker:rejected', { requestId: request._id, userId: request.user.toString(), by: socket.userId });
+      const updatePayload = { requestId: request._id.toString(), userId: request.user.toString(), by: socket.userId.toString(), status: 'rejected' };
+      io.to(room.roomId).emit('speaker:rejected', updatePayload);
+      io.to(room.roomId).emit('join-request:updated', updatePayload);
     }
 
     const joined = await loadRoom(room.roomId);
@@ -382,6 +434,7 @@ const handleSpeakerDecision = async (io, socket, payload = {}, approve = true, a
       userId: socket.userId,
       onlineUsers: getRoomOnlineUsers(room._id),
       typingUsers: getRoomTypingUsers(room._id),
+      pendingSpeakerRequests: await SpeakerRequest.getPendingForRoom(room._id),
     });
     socket.data.lastRoomState = state;
     io.to(room.roomId).emit('room:state', state);
@@ -487,32 +540,41 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       return;
     }
 
-    let aiAnalysis = { approved: true, status: 'approved' };
-    if (room.settings?.aiModerationEnabled) {
-      aiAnalysis = await analyzeMessage(content, room.roomId, socket.userId);
-    }
+    const moderationDecision = await moderationService.evaluateModerationDecision({
+      content,
+      room,
+      user: socket.user,
+      userId: socket.userId,
+      aiServerUrl: AI_SERVER_URL,
+      timeout: 5000,
+      aiModerationEnabled: Boolean(room.settings?.aiModerationEnabled),
+      toxicityThreshold: room.settings?.toxicityThreshold,
+    });
 
-    if (aiAnalysis.approved === false) {
+    if ([moderationService.MODERATION_STATES.PROFANITY_CONFIRMED, moderationService.MODERATION_STATES.TOXIC_CONFIRMED, moderationService.MODERATION_STATES.SPAM_CONFIRMED].includes(moderationDecision.state)) {
       const moderationOutcome = await moderationService.recordModerationDecision({
         room,
         user: socket.user,
         content,
-        normalizedContent,
-        matchedTerms: profanityDecision.matchedTerms,
-        severity: aiAnalysis.severity || 'high',
+        normalizedContent: moderationDecision.normalizedContent || normalizedContent,
+        matchedTerms: moderationDecision.matchedTerms || profanityDecision.matchedTerms,
+        severity: moderationDecision.severity || 'high',
         action: 'message-blocked',
-        source: 'ai',
-        reason: aiAnalysis.reason || 'Message blocked by AI moderator.',
-        filterEngine: 'ai-moderator',
-        aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
-        factCheckResults: aiAnalysis.factCheck || null,
+        source: moderationDecision.state === moderationService.MODERATION_STATES.PROFANITY_CONFIRMED ? 'system' : 'ai',
+        reason: moderationDecision.reason || 'Message blocked by moderation policy.',
+        filterEngine: moderationDecision.filterEngine || 'ai-moderator',
+        aiScores: { toxicity: moderationDecision.toxicityScore || 0 },
+        factCheckResults: moderationDecision.factCheck || null,
       });
 
       const response = {
         ok: false,
         blocked: true,
-        pendingReview: Boolean(aiAnalysis.pendingReview),
-        reason: aiAnalysis.reason || 'Message blocked by AI moderator.',
+        state: moderationDecision.state,
+        status: moderationDecision.status,
+        reason: moderationDecision.reason || 'Message blocked by moderation policy.',
+        toxicityScore: moderationDecision.state === moderationService.MODERATION_STATES.TOXIC_CONFIRMED ? (moderationDecision.toxicityScore || 0) : 0,
+        fallacies: moderationDecision.fallacies || [],
         warningCount: moderationOutcome.warningCount,
         muteApplied: moderationOutcome.muteApplied,
       };
@@ -521,35 +583,36 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       socket.emit('moderation:warning', {
         userId: socket.userId,
         reason: response.reason,
-        pendingReview: response.pendingReview,
         blocked: true,
+        state: moderationDecision.state,
       });
-      debugSocket('message blocked by ai moderator', socket.user.username, room.roomId, clientMessageId);
+      debugSocket('message blocked by moderation state', moderationDecision.state, socket.user.username, room.roomId, clientMessageId);
       return;
     }
 
-    if (aiAnalysis.pendingReview || aiAnalysis.degraded || aiAnalysis.aiUnavailable) {
+    if (moderationDecision.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE || moderationDecision.state === moderationService.MODERATION_STATES.PENDING_REVIEW) {
       await moderationService.logModerationDegradation({
         room,
         user: socket.user,
         content,
-        normalizedContent,
-        reason: aiAnalysis.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
-        source: aiAnalysis.aiUnavailable ? 'system' : 'ai',
-        aiScores: { toxicity: aiAnalysis.toxicityScore || 0 },
+        normalizedContent: moderationDecision.normalizedContent || normalizedContent,
+        reason: moderationDecision.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
+        source: moderationDecision.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE ? 'system' : 'ai',
+        aiScores: { toxicity: moderationDecision.toxicityScore || 0 },
       });
 
       const warning = {
         userId: socket.userId,
         roomId: room.roomId,
-        reason: aiAnalysis.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
-        degraded: true,
-        pendingReview: Boolean(aiAnalysis.pendingReview),
-        aiUnavailable: Boolean(aiAnalysis.aiUnavailable),
+        reason: moderationDecision.reason || 'AI moderation unavailable. Message allowed under local moderation fallback.',
+        state: moderationDecision.state,
+        degraded: moderationDecision.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE,
+        pendingReview: moderationDecision.state === moderationService.MODERATION_STATES.PENDING_REVIEW,
+        aiUnavailable: moderationDecision.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE,
       };
 
       socket.emit('moderation:warning', warning);
-      debugSocket('message allowed with degraded ai moderation', socket.user.username, room.roomId, clientMessageId);
+      debugSocket('message allowed with non-blocking moderation state', moderationDecision.state, socket.user.username, room.roomId, clientMessageId);
     }
 
     const message = await Message.create({
@@ -561,28 +624,34 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       moderation: {
         analyzed: true,
         analyzedAt: new Date(),
+        state: moderationDecision.state,
+        status: moderationDecision.status,
+        source: moderationDecision.source,
+        reason: moderationDecision.reason || null,
+        pendingReview: moderationDecision.state === moderationService.MODERATION_STATES.PENDING_REVIEW,
+        aiUnavailable: moderationDecision.state === moderationService.MODERATION_STATES.AI_UNAVAILABLE,
         toxicity: {
-          score: aiAnalysis.toxicityScore || 0,
-          flagged: aiAnalysis.isToxic || false,
+          score: moderationDecision.state === moderationService.MODERATION_STATES.TOXIC_CONFIRMED ? (moderationDecision.toxicityScore || 0) : 0,
+          flagged: moderationDecision.state === moderationService.MODERATION_STATES.TOXIC_CONFIRMED,
         },
         fallacy: {
-          detected: aiAnalysis.hasFallacy || false,
-          types: (aiAnalysis.fallacies || []).map((fallacy) => ({
+          detected: moderationDecision.hasFallacy || false,
+          types: (moderationDecision.fallacies || []).map((fallacy) => ({
             name: fallacy.name || fallacy.type || 'unknown',
             confidence: fallacy.confidence || 0.7,
             explanation: fallacy.description || fallacy.explanation || '',
           })),
         },
         factCheck: {
-          performed: Boolean(aiAnalysis.factCheck),
-          claims: (aiAnalysis.factCheck?.claims || []).map((claim) => ({
+          performed: Boolean(moderationDecision.factCheck),
+          claims: (moderationDecision.factCheck?.claims || []).map((claim) => ({
             claim: claim.claim,
             verdict: claim.verdict,
             sources: claim.sources || [],
             explanation: claim.explanation || '',
           })),
         },
-        aiNotes: aiAnalysis.summary || '',
+        aiNotes: moderationDecision.summary || moderationDecision.message || '',
       },
       status: 'approved',
     });
@@ -617,13 +686,23 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       moderation: message.moderation,
     };
 
+    const deliveryPayload = {
+      roomId: room.roomId,
+      messageId: message._id.toString(),
+      clientMessageId,
+      status: 'delivered',
+      deliveredAt: message.createdAt,
+    };
+
     userEvents.set(clientMessageId, message._id.toString());
     processedEvents.set(socket.userId, userEvents);
 
     await realtime.recordActivity({ room: room._id, actor: socket.userId, type: 'message-sent', payload: { messageId: message._id } });
     debugSocket('message sent', socket.user.username, room.roomId, message._id.toString(), clientMessageId);
+    socket.emit('message:sent', deliveryPayload);
+    socket.emit('message:delivered', deliveryPayload);
     io.to(room.roomId).emit('message:new', messagePayload);
-    if (typeof ack === 'function') ack({ ok: true, message: messagePayload });
+    if (typeof ack === 'function') ack({ ok: true, message: messagePayload, delivery: deliveryPayload });
   } catch (error) {
     console.error('Message send error:', error);
     if (typeof ack === 'function') ack({ ok: false, error: error.message || 'Failed to send message' });

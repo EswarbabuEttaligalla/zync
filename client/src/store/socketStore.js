@@ -100,6 +100,15 @@ const normalizeRoomState = (state = {}) => ({
   speakerRequests: state.speakerRequests || [],
 });
 
+const buildCanonicalRoomState = (normalized) => ({
+  ...normalized.room,
+  participants: normalized.participants,
+  onlineUsers: normalized.onlineUsers,
+  typingUsers: normalized.typingUsers,
+  messages: normalized.messages,
+  speakerRequests: normalized.speakerRequests,
+});
+
 const upsertMessage = (messages, incoming) => {
   const incomingId = incoming._id || incoming.id || incoming.clientMessageId;
   const next = messages.filter((message) => {
@@ -118,6 +127,35 @@ const updateMessage = (messages, messageId, updater) => messages.map((message) =
 const removeMessage = (messages, messageId) => messages.filter((message) => {
   const currentId = message._id || message.id || message.clientMessageId;
   return currentId !== messageId;
+});
+
+const syncMessageByClientId = (messages, clientMessageId, patch) => messages.map((message) => (
+  message.clientMessageId === clientMessageId ? { ...message, ...patch } : message
+));
+
+const removeRequestById = (requests = [], requestId) => (requests || []).filter((request) => {
+  const currentId = request.requestId || request.id || request._id;
+  return currentId?.toString?.() !== requestId?.toString?.();
+});
+
+const upsertRequest = (requests = [], incoming = {}) => {
+  const requestId = incoming.requestId || incoming.id || incoming._id;
+  const next = removeRequestById(requests, requestId);
+  next.push({
+    ...incoming,
+    requestId: requestId?.toString?.() || requestId,
+    id: requestId?.toString?.() || requestId,
+    _id: incoming._id || requestId,
+  });
+  return next.sort((left, right) => new Date(left.createdAt || 0) - new Date(right.createdAt || 0));
+};
+
+const upsertParticipantRole = (participants = [], userId, role) => participants.map((participant) => {
+  const participantId = participant.id || participant.userId || participant.user?._id || participant.user?.id;
+  if (participantId?.toString?.() !== userId?.toString?.()) {
+    return participant;
+  }
+  return { ...participant, role };
 });
 
 const emitCustomEvent = (name, detail) => {
@@ -196,7 +234,7 @@ export const useSocketStore = create((set, get) => ({
       console.debug('[socket] room:state', state.room?.roomId);
       const normalized = normalizeRoomState(state);
       set({
-        roomState: normalized.room,
+        roomState: buildCanonicalRoomState(normalized),
         currentRoom: normalized.room,
         joinedRoomId: normalized.room?.roomId || null,
         joinedSocketId: socket.id,
@@ -249,9 +287,55 @@ export const useSocketStore = create((set, get) => ({
       emitCustomEvent('notification:new', notification);
     });
 
-    socket.on('moderation:warning', (warning) => emitCustomEvent('ai-warning', warning));
+    socket.on('moderation:warning', (warning) => emitCustomEvent('moderation:status', warning));
+    socket.on('speaker:request', (request) => {
+      set((state) => ({
+        speakerRequests: upsertRequest(state.speakerRequests, request),
+        roomState: state.roomState ? { ...state.roomState, speakerRequests: upsertRequest(state.roomState.speakerRequests || [], request) } : state.roomState,
+      }));
+      emitCustomEvent('speaker:request', request);
+    });
+    socket.on('join-request:new', (request) => {
+      set((state) => ({
+        speakerRequests: upsertRequest(state.speakerRequests, request),
+        roomState: state.roomState ? { ...state.roomState, speakerRequests: upsertRequest(state.roomState.speakerRequests || [], request) } : state.roomState,
+      }));
+      emitCustomEvent('join-request:new', request);
+    });
+    socket.on('speaker:approved', (payload) => {
+      set((state) => ({
+        speakerRequests: removeRequestById(state.speakerRequests, payload.requestId),
+        participants: dedupeParticipants(upsertParticipantRole(state.participants, payload.userId, 'participant')),
+        roomState: state.roomState ? {
+          ...state.roomState,
+          speakerRequests: removeRequestById(state.roomState.speakerRequests || [], payload.requestId),
+          participants: dedupeParticipants(upsertParticipantRole(state.roomState.participants || [], payload.userId, 'participant')),
+        } : state.roomState,
+      }));
+      emitCustomEvent('speaker:approved', payload);
+    });
+    socket.on('speaker:rejected', (payload) => {
+      set((state) => ({
+        speakerRequests: removeRequestById(state.speakerRequests, payload.requestId),
+        roomState: state.roomState ? {
+          ...state.roomState,
+          speakerRequests: removeRequestById(state.roomState.speakerRequests || [], payload.requestId),
+        } : state.roomState,
+      }));
+      emitCustomEvent('speaker:rejected', payload);
+    });
+    socket.on('join-request:updated', (payload) => {
+      set((state) => ({
+        speakerRequests: removeRequestById(state.speakerRequests, payload.requestId),
+        roomState: state.roomState ? {
+          ...state.roomState,
+          speakerRequests: removeRequestById(state.roomState.speakerRequests || [], payload.requestId),
+        } : state.roomState,
+      }));
+      emitCustomEvent('join-request:updated', payload);
+    });
     socket.on('message:blocked', (data) => emitCustomEvent('ai-warning', {
-      type: 'toxicity',
+      type: data.state === 'PROFANITY_CONFIRMED' ? 'blocked' : 'toxicity',
       message: data.reason || 'Message blocked due to inappropriate language.',
       suggestions: ['Please rephrase your message respectfully.'],
       blocked: true,
@@ -267,6 +351,30 @@ export const useSocketStore = create((set, get) => ({
           message,
         ),
         pendingMessages: state.pendingMessages.filter((entry) => entry.clientMessageId !== message.clientMessageId),
+      }));
+    });
+
+    socket.on('message:sent', (payload) => {
+      set((state) => ({
+        messages: syncMessageByClientId(state.messages, payload.clientMessageId, {
+          _id: payload.messageId,
+          id: payload.messageId,
+          status: 'sent',
+          pending: false,
+        }),
+        pendingMessages: removeMessage(state.pendingMessages, payload.clientMessageId),
+      }));
+    });
+
+    socket.on('message:delivered', (payload) => {
+      set((state) => ({
+        messages: syncMessageByClientId(state.messages, payload.clientMessageId, {
+          _id: payload.messageId,
+          id: payload.messageId,
+          status: 'delivered',
+          pending: false,
+        }),
+        pendingMessages: removeMessage(state.pendingMessages, payload.clientMessageId),
       }));
     });
 
@@ -301,16 +409,19 @@ export const useSocketStore = create((set, get) => ({
             ? { ...participant, role: payload.role }
             : participant
         ))),
-        roomState: state.roomState && currentUserId && currentUserId === payload.userId?.toString?.()
-          ? {
-            ...state.roomState,
-            role: payload.role,
-            canSendMessage: ['owner', 'moderator', 'participant'].includes(payload.role),
-            canReact: true,
-            canModerate: ['owner', 'moderator'].includes(payload.role),
-            canRequestSpeaker: payload.role === 'viewer',
-          }
-          : state.roomState,
+        roomState: state.roomState ? {
+          ...state.roomState,
+          participants: dedupeParticipants(upsertParticipantRole(state.roomState.participants || [], payload.userId, payload.role)),
+          ...(currentUserId && currentUserId === payload.userId?.toString?.()
+            ? {
+              role: payload.role,
+              canSendMessage: ['owner', 'moderator', 'participant'].includes(payload.role),
+              canReact: true,
+              canModerate: ['owner', 'moderator'].includes(payload.role),
+              canRequestSpeaker: payload.role === 'viewer',
+            }
+            : {}),
+        } : state.roomState,
       }));
     });
 
@@ -318,7 +429,7 @@ export const useSocketStore = create((set, get) => ({
       console.debug('[socket] room:joined', state.room?.roomId);
       const normalized = normalizeRoomState(state);
       set({
-        roomState: normalized.room,
+        roomState: buildCanonicalRoomState(normalized),
         currentRoom: normalized.room,
         joinedRoomId: normalized.room?.roomId || null,
         joinedSocketId: socket.id,
@@ -418,7 +529,7 @@ export const useSocketStore = create((set, get) => ({
       type: options.type || 'text',
       sender: options.sender || null,
       createdAt: new Date().toISOString(),
-      status: 'pending',
+      status: 'sending',
       pending: true,
       replyTo: options.replyTo || null,
       reactions: [],
@@ -429,17 +540,45 @@ export const useSocketStore = create((set, get) => ({
       pendingMessages: upsertMessage(state.pendingMessages, optimisticMessage),
     }));
 
-    const response = await emitWithAck(socket, 'message:send', {
-      roomId,
-      content,
-      type: options.type || 'text',
-      replyTo: options.replyTo,
-      clientMessageId,
-    });
+    let response;
+    try {
+      response = await Promise.race([
+        emitWithAck(socket, 'message:send', {
+          roomId,
+          content,
+          type: options.type || 'text',
+          replyTo: options.replyTo,
+          clientMessageId,
+        }),
+        new Promise((resolve) => setTimeout(() => resolve({ ok: false, timeout: true, error: 'Message delivery timed out' }), 12000)),
+      ]);
+    } catch (error) {
+      response = { ok: false, error: error.message || 'Failed to send message' };
+    }
 
-    if (!response.ok) {
+    if (response.ok) {
+      set((state) => ({
+        messages: syncMessageByClientId(state.messages, clientMessageId, {
+          status: response.delivery?.status || 'sent',
+          pending: false,
+          _id: response.message?._id || response.message?.id || clientMessageId,
+          id: response.message?._id || response.message?.id || clientMessageId,
+          moderation: response.message?.moderation,
+        }),
+        pendingMessages: removeMessage(state.pendingMessages, clientMessageId),
+      }));
+    } else if (response.blocked) {
       set((state) => ({
         messages: removeMessage(state.messages, clientMessageId),
+        pendingMessages: removeMessage(state.pendingMessages, clientMessageId),
+      }));
+    } else {
+      set((state) => ({
+        messages: syncMessageByClientId(state.messages, clientMessageId, {
+          status: 'failed',
+          pending: false,
+          error: response.error || 'Failed to send message',
+        }),
         pendingMessages: removeMessage(state.pendingMessages, clientMessageId),
       }));
     }
