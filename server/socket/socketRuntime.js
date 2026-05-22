@@ -621,6 +621,16 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       content,
       type: payload.type || 'text',
       replyTo: payload.replyTo || undefined,
+      replySnapshot: payload.replySnapshot || undefined,
+      attachments: Array.isArray(payload.attachments) ? payload.attachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        url: attachment.url,
+        previewUrl: attachment.previewUrl || null,
+        storagePath: attachment.storagePath || null,
+      })) : [],
       moderation: {
         analyzed: true,
         analyzedAt: new Date(),
@@ -673,6 +683,7 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       content: message.content,
       type: message.type,
       replyTo: message.replyTo,
+      replySnapshot: message.replySnapshot || null,
       sender: {
         id: message.sender._id.toString(),
         _id: message.sender._id.toString(),
@@ -683,6 +694,7 @@ const handleMessageSend = async (io, socket, payload = {}, ack) => {
       updatedAt: message.updatedAt,
       status: message.status,
       reactions: message.reactions,
+      attachments: message.attachments || [],
       moderation: message.moderation,
     };
 
@@ -737,6 +749,9 @@ const handleMessageEdit = async (io, socket, payload = {}, ack) => {
       content: updated.content,
       sender: updated.sender,
       reactions: updated.reactions,
+      replyTo: updated.replyTo,
+      replySnapshot: updated.replySnapshot || null,
+      attachments: updated.attachments || [],
       isEdited: true,
       updatedAt: updated.updatedAt,
     };
@@ -755,7 +770,12 @@ const handleMessageDelete = async (io, socket, payload = {}, ack) => {
     const room = await loadRoom(message.room.toString());
     if (!room) throw new Error('Room not found');
 
-    const canDelete = message.sender.toString() === socket.userId.toString() || room.canModerate(socket.userId);
+    const role = room.getMemberRole(socket.userId);
+    const isOwner = room.host.toString() === socket.userId.toString();
+    const isModerator = room.canModerate(socket.userId);
+    const isParticipant = role === 'participant';
+    const isOwnMessage = message.sender.toString() === socket.userId.toString();
+    const canDelete = isOwner || isModerator || (isParticipant && isOwnMessage);
     if (!canDelete) throw new Error('Not allowed to delete this message');
 
     message.isDeleted = true;

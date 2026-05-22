@@ -4,12 +4,44 @@
  */
 
 const express = require('express');
+const fs = require('fs');
+const fsp = require('fs/promises');
+const path = require('path');
+const crypto = require('crypto');
 const router = express.Router();
 const Message = require('../models/Message');
 const Room = require('../models/Room');
 const ModerationLog = require('../models/ModerationLog');
 const moderationService = require('../services/moderationService');
+const { emitRoomState } = require('../services/roomRealtimeService');
 const { asyncHandler, AppError } = require('../middleware/errorHandler');
+
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'application/pdf', 'text/plain']);
+
+const ensureUploadDir = async () => {
+  await fsp.mkdir(UPLOAD_DIR, { recursive: true });
+};
+
+const sanitizeFileName = (value = 'file') => String(value).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'file';
+
+const parseDataUrl = (value) => {
+  const match = /^data:([^;]+);base64,(.*)$/s.exec(value || '');
+  if (!match) return null;
+  return {
+    mimeType: match[1],
+    base64: match[2],
+  };
+};
+
+const buildReplySnapshot = (message) => ({
+  messageId: message._id.toString(),
+  senderName: message.sender?.username || 'Unknown',
+  senderAvatar: message.sender?.profile?.avatar || null,
+  content: message.content?.slice(0, 200) || '',
+  createdAt: message.createdAt,
+});
 
 /**
  * @route   GET /api/messages/:roomId
@@ -53,7 +85,11 @@ router.get('/:roomId', asyncHandler(async (req, res) => {
   ]);
 
   res.json({
-    messages: messages.reverse(),
+    messages: messages.reverse().map((message) => ({
+      ...message.toObject(),
+      replySnapshot: message.replySnapshot || null,
+      attachments: message.attachments || [],
+    })),
     pagination: {
       page,
       limit,
@@ -95,7 +131,7 @@ router.get('/:roomId/search', asyncHandler(async (req, res) => {
     .sort({ createdAt: -1 })
     .limit(100);
 
-  res.json({ messages });
+  res.json({ messages: messages.map((message) => ({ ...message.toObject(), replySnapshot: message.replySnapshot || null, attachments: message.attachments || [] })) });
 }));
 
 /**
@@ -139,9 +175,9 @@ router.delete('/:messageId', asyncHandler(async (req, res) => {
   }
 
   const room = await Room.findById(message.room);
-  const isOwner = message.sender.toString() === req.userId;
-  const isModerator = room.moderators.some(m => m.toString() === req.userId);
-  const isHost = room.host.toString() === req.userId;
+  const isOwner = message.sender.toString() === req.userId.toString();
+  const isModerator = room.moderators.some(m => m.toString() === req.userId.toString());
+  const isHost = room.host.toString() === req.userId.toString();
 
   if (!isOwner && !isModerator && !isHost) {
     throw new AppError('Not authorized to delete this message', 403);
@@ -153,6 +189,56 @@ router.delete('/:messageId', asyncHandler(async (req, res) => {
   await message.save();
 
   res.json({ message: 'Message deleted successfully' });
+}));
+
+router.post('/uploads', asyncHandler(async (req, res) => {
+  const { fileName, mimeType, dataUrl, base64, size } = req.body || {};
+  const payload = typeof dataUrl === 'string' ? parseDataUrl(dataUrl) : null;
+  const resolvedMimeType = mimeType || payload?.mimeType;
+  const resolvedBase64 = base64 || payload?.base64;
+  const resolvedSize = Number(size || 0);
+
+  if (!resolvedMimeType || !ALLOWED_ATTACHMENT_TYPES.has(resolvedMimeType)) {
+    throw new AppError('Unsupported attachment type', 400);
+  }
+
+  if (!resolvedBase64) {
+    throw new AppError('Attachment data is required', 400);
+  }
+
+  const buffer = Buffer.from(resolvedBase64, 'base64');
+  if (buffer.length === 0) {
+    throw new AppError('Attachment data is invalid', 400);
+  }
+
+  if (buffer.length > MAX_UPLOAD_SIZE || (resolvedSize && resolvedSize > MAX_UPLOAD_SIZE)) {
+    throw new AppError('Attachment exceeds maximum file size', 400);
+  }
+
+  await ensureUploadDir();
+  const extensionMap = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+  };
+  const extension = extensionMap[resolvedMimeType] || 'bin';
+  const storedName = `${crypto.randomUUID()}.${extension}`;
+  const storedPath = path.join(UPLOAD_DIR, storedName);
+  await fsp.writeFile(storedPath, buffer);
+
+  const attachment = {
+    id: crypto.randomUUID(),
+    name: sanitizeFileName(fileName || storedName),
+    mimeType: resolvedMimeType,
+    size: buffer.length,
+    url: `/uploads/${storedName}`,
+    previewUrl: resolvedMimeType.startsWith('image/') ? `/uploads/${storedName}` : null,
+    storagePath: storedPath,
+  };
+
+  res.status(201).json({ attachment });
 }));
 
 /**

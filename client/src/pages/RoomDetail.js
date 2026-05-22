@@ -32,7 +32,7 @@ import { Button, Badge, Avatar, Spinner, cn } from '../components/ui';
 import { ChatMessage, AIWarningToast } from '../components/Chat';
 import { useAuthStore } from '../store/authStore';
 import { useSocketStore } from '../store/socketStore';
-import { roomAPI } from '../services/api';
+import { roomAPI, messageAPI } from '../services/api';
 import toast from 'react-hot-toast';
 
 const RoomDetail = () => {
@@ -61,10 +61,23 @@ const RoomDetail = () => {
   const messageInputRef = useRef(null);
   
   const [message, setMessage] = useState('');
+  const [replyTarget, setReplyTarget] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
   const [aiWarning, setAiWarning] = useState(null);
   const [moderationStatus, setModerationStatus] = useState(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const updateSidebar = () => setShowSidebar(!mediaQuery.matches);
+    updateSidebar();
+    mediaQuery.addEventListener('change', updateSidebar);
+    return () => mediaQuery.removeEventListener('change', updateSidebar);
+  }, []);
 
   // Fetch room data
   const { data: roomData, isLoading } = useQuery({
@@ -196,14 +209,102 @@ const RoomDetail = () => {
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!message.trim() || !canSendMessage || isMuted || !isConnected) return;
+    const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready');
+    if ((!message.trim() && readyAttachments.length === 0) || !canSendMessage || isMuted || !isConnected) return;
 
-    const response = await sendMessage(roomId, message.trim());
+    const response = await sendMessage(roomId, message.trim(), {
+      replyTo: replyTarget?.messageId || replyTarget?._id || replyTarget?.id || null,
+      replySnapshot: replyTarget || null,
+      attachments: readyAttachments.map((attachment) => attachment.payload || attachment),
+    });
     if (!response?.ok) {
       toast.error(response?.error || response?.reason || 'Failed to send message');
+    } else {
+      setReplyTarget(null);
+      setAttachments([]);
     }
     setMessage('');
     stopTyping(roomId);
+  };
+
+  const uploadSelectedFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setIsUploading(true);
+
+    const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+
+    try {
+      const pendingItems = await Promise.all(files.map(async (file) => ({
+        tempId: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        file,
+        fileName: file.name,
+        mimeType: file.type,
+        size: file.size,
+        previewUrl: file.type.startsWith('image/') ? await readFileAsDataUrl(file) : null,
+        progress: 0,
+        status: 'uploading',
+      })));
+
+      setAttachments((current) => [...current, ...pendingItems]);
+
+      for (const item of pendingItems) {
+        const dataUrl = await readFileAsDataUrl(item.file);
+        const response = await messageAPI.uploadAttachment({
+          fileName: item.fileName,
+          mimeType: item.mimeType,
+          size: item.size,
+          dataUrl,
+        }, {
+          onUploadProgress: (progressEvent) => {
+            const total = progressEvent.total || item.file.size || 1;
+            const progress = Math.min(100, Math.round((progressEvent.loaded / total) * 100));
+            setAttachments((current) => current.map((attachment) => (
+              attachment.tempId === item.tempId
+                ? { ...attachment, progress }
+                : attachment
+            )));
+          },
+        });
+
+        const uploadedAttachment = {
+          tempId: item.tempId,
+          ...response.data.attachment,
+          status: 'ready',
+          progress: 100,
+          payload: response.data.attachment,
+          previewUrl: item.previewUrl || response.data.attachment.previewUrl || null,
+          file: item.file,
+        };
+
+        setAttachments((current) => current.map((attachment) => (
+          attachment.tempId === item.tempId ? uploadedAttachment : attachment
+        )));
+      }
+
+      toast.success(`${pendingItems.length} attachment${pendingItems.length > 1 ? 's' : ''} added`);
+    } catch (error) {
+      setAttachments((current) => current.map((attachment) => (
+        attachment.status === 'uploading'
+          ? { ...attachment, status: 'failed', error: error?.message || 'Upload failed' }
+          : attachment
+      )));
+      toast.error(error?.response?.data?.message || error.message || 'Failed to attach file');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const retryAttachment = async (attachment) => {
+    if (!attachment?.file) return;
+    setAttachments((current) => current.filter((item) => item.tempId !== attachment.tempId));
+    await uploadSelectedFiles([attachment.file]);
   };
 
   const handleTyping = (e) => {
@@ -214,6 +315,65 @@ const RoomDetail = () => {
       stopTyping(roomId);
     }
   };
+
+  const handleReply = (targetMessage) => {
+    setReplyTarget({
+      messageId: targetMessage._id || targetMessage.id,
+      content: targetMessage.content,
+      senderName: targetMessage.sender?.username || 'Unknown',
+      senderAvatar: targetMessage.sender?.avatar || null,
+      createdAt: targetMessage.createdAt,
+    });
+    messageInputRef.current?.focus();
+  };
+
+  const handleInsertEmoji = (emoji) => {
+    setMessage((current) => `${current}${emoji}`);
+    messageInputRef.current?.focus();
+  };
+
+  const handleFileChange = (event) => {
+    uploadSelectedFiles(event.target.files);
+  };
+
+  const removeAttachment = (attachmentId) => {
+    setAttachments((current) => current.filter((attachment) => (attachment.id || attachment.url) !== attachmentId));
+  };
+
+  const handleDeleteMessage = async (targetMessage) => {
+    const confirmed = window.confirm('Delete this message?');
+    if (!confirmed) return;
+    const response = await useSocketStore.getState().deleteMessage(targetMessage._id || targetMessage.id, roomId);
+    if (!response?.ok) toast.error(response?.error || 'Failed to delete message');
+  };
+
+  const handleRetryMessage = async (targetMessage) => {
+    const response = await sendMessage(roomId, targetMessage.content || '', {
+      clientMessageId: targetMessage.clientMessageId || targetMessage._id || targetMessage.id,
+      replyTo: targetMessage.replyTo || null,
+      replySnapshot: targetMessage.replySnapshot || null,
+      attachments: (targetMessage.attachments || []).filter((attachment) => attachment.status !== 'failed'),
+      type: targetMessage.type || 'text',
+    });
+
+    if (!response?.ok) {
+      toast.error(response?.error || 'Retry failed');
+    }
+  };
+
+  const handleDrop = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(false);
+    await uploadSelectedFiles(event.dataTransfer.files);
+  };
+
+  const handleDragOver = (event) => {
+    event.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = () => setIsDragOver(false);
 
   const handleLeaveRoom = async () => {
     try {
@@ -280,7 +440,25 @@ const RoomDetail = () => {
   return (
     <div className="flex h-[calc(100vh-6rem)] -m-6 bg-dark-950">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className="relative flex-1 flex flex-col" onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}>
+        <AnimatePresence>
+          {isDragOver && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-3 z-20 rounded-3xl border-2 border-dashed border-primary-400 bg-primary-500/10 backdrop-blur-sm pointer-events-none"
+            >
+              <div className="flex h-full items-center justify-center text-center">
+                <div>
+                  <Paperclip className="mx-auto mb-2 h-8 w-8 text-primary-300" />
+                  <p className="text-sm font-medium text-white">Drop files to attach them</p>
+                  <p className="text-xs text-dark-300">Images, PDFs, and text files upload instantly</p>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
         {!isConnected && (
           <div className="px-6 py-2 bg-amber-500/10 border-b border-amber-500/20 text-amber-300 text-sm flex items-center justify-between">
             <span>{connectionStatus === 'reconnecting' ? 'Reconnecting to live debate...' : 'Disconnected from live updates. Trying to recover...'}</span>
@@ -289,15 +467,15 @@ const RoomDetail = () => {
         )}
 
         {/* Chat Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-dark-800 bg-dark-900/50">
-          <div className="flex items-center gap-4">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-dark-800 bg-dark-900/50">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-4">
             <Link to="/rooms" className="p-2 hover:bg-dark-800 rounded-lg transition-colors">
               <ArrowLeft className="w-5 h-5 text-dark-400" />
             </Link>
             
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-semibold text-white">{room.name}</h1>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-lg font-semibold text-white">{room.name}</h1>
                 {room.isPrivate && <Lock className="w-4 h-4 text-dark-400" />}
                 <Badge variant={room.status === 'active' ? 'success' : 'warning'} size="sm">
                   {room.status}
@@ -337,7 +515,17 @@ const RoomDetail = () => {
             <button
               onClick={() => setShowSidebar(!showSidebar)}
               className={cn(
-                'p-2 rounded-lg transition-colors',
+                'p-2 rounded-lg transition-colors md:hidden',
+                showSidebar ? 'bg-primary-500/20 text-primary-400' : 'hover:bg-dark-800 text-dark-400'
+              )}
+            >
+              <Users className="w-5 h-5" />
+            </button>
+
+            <button
+              onClick={() => setShowSidebar(!showSidebar)}
+              className={cn(
+                'hidden p-2 rounded-lg transition-colors md:inline-flex',
                 showSidebar ? 'bg-primary-500/20 text-primary-400' : 'hover:bg-dark-800 text-dark-400'
               )}
             >
@@ -402,7 +590,7 @@ const RoomDetail = () => {
         </AnimatePresence>
 
         {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 sm:space-y-4 scrollbar-thin">
           {/* Topic Banner */}
           {room.topic && (
             <div className="bg-gradient-to-r from-primary-500/10 to-accent-500/10 border border-primary-500/20 rounded-2xl p-4 mb-6">
@@ -425,6 +613,9 @@ const RoomDetail = () => {
               message={msg}
               isOwn={msg.sender?.id === user?._id || msg.sender?._id === user?._id}
               showAvatar={showAvatar}
+              onReply={handleReply}
+              onDelete={handleDeleteMessage}
+              onRetry={handleRetryMessage}
             />
           ))}
 
@@ -455,7 +646,92 @@ const RoomDetail = () => {
 
         {/* Message Input */}
         <form onSubmit={handleSendMessage} className="p-4 border-t border-dark-800 bg-dark-900/50">
-          <div className="flex items-end gap-3">
+          {replyTarget && (
+            <div className="mb-3 rounded-2xl border border-primary-500/20 bg-primary-500/5 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-primary-400">Replying to {replyTarget.senderName}</p>
+                  <p className="mt-1 text-sm text-white line-clamp-2">{replyTarget.content}</p>
+                </div>
+                <button type="button" onClick={() => setReplyTarget(null)} className="text-dark-400 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {attachments.length > 0 && (
+            <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {attachments.map((attachment) => {
+                const key = attachment.tempId || attachment.id || attachment.url;
+                const isImage = Boolean(attachment.previewUrl || attachment.mimeType?.startsWith('image/'));
+                const isFailed = attachment.status === 'failed';
+                const isUploadingAttachment = attachment.status === 'uploading';
+                return (
+                  <motion.div
+                    key={key}
+                    layout
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    className={cn(
+                      'overflow-hidden rounded-2xl border bg-dark-800/80 shadow-lg',
+                      isFailed ? 'border-red-500/30' : 'border-dark-700'
+                    )}
+                  >
+                    {isImage ? (
+                      <div className="relative aspect-video bg-dark-900">
+                        <img src={attachment.previewUrl || attachment.url} alt={attachment.name} className="h-full w-full object-cover" />
+                        {isUploadingAttachment && (
+                          <div className="absolute inset-0 bg-black/40">
+                            <div className="absolute bottom-3 left-3 right-3">
+                              <div className="h-1.5 rounded-full bg-white/20">
+                                <div className="h-1.5 rounded-full bg-primary-400 transition-all" style={{ width: `${attachment.progress || 0}%` }} />
+                              </div>
+                              <p className="mt-2 text-xs text-white">Uploading {attachment.progress || 0}%</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 p-3">
+                        <div className="rounded-xl bg-primary-500/10 p-2 text-primary-300">
+                          <Paperclip className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-white">{attachment.name || attachment.fileName}</p>
+                          <p className="text-xs text-dark-400">{attachment.size ? `${Math.round(attachment.size / 1024)} KB` : 'File'}</p>
+                          {isUploadingAttachment && (
+                            <div className="mt-2 h-1.5 rounded-full bg-dark-700">
+                              <div className="h-1.5 rounded-full bg-primary-400 transition-all" style={{ width: `${attachment.progress || 0}%` }} />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-2 border-t border-dark-700 px-3 py-2 text-xs">
+                      <span className={cn(isFailed ? 'text-red-300' : 'text-dark-400')}>
+                        {isFailed ? attachment.error || 'Upload failed' : isUploadingAttachment ? 'Uploading...' : 'Ready'}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {isFailed && (
+                          <button type="button" onClick={() => retryAttachment(attachment)} className="rounded-lg border border-dark-600 px-2 py-1 text-dark-200 hover:border-primary-500/40 hover:text-white">
+                            Retry
+                          </button>
+                        )}
+                        <button type="button" onClick={() => removeAttachment(key)} className="rounded-lg border border-dark-600 px-2 py-1 text-dark-400 hover:border-red-500/40 hover:text-red-300">
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <div className="flex-1 bg-dark-800 border border-dark-700 rounded-2xl focus-within:border-primary-500 transition-colors">
               <textarea
                 ref={messageInputRef}
@@ -464,7 +740,7 @@ const RoomDetail = () => {
                 placeholder={canSendMessage ? 'Type your argument...' : 'Request speaker access to send messages'}
                 rows={1}
                 className="w-full bg-transparent px-4 py-3 text-white placeholder-dark-400 resize-none focus:outline-none"
-                style={{ minHeight: '48px', maxHeight: '120px' }}
+                style={{ minHeight: '48px', maxHeight: '140px' }}
                 disabled={!canSendMessage || isMuted || !isConnected}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -475,18 +751,19 @@ const RoomDetail = () => {
               />
               <div className="flex items-center justify-between px-3 pb-2">
                 <div className="flex items-center gap-1">
-                  <button type="button" className="p-2 text-dark-400 hover:text-white rounded-lg transition-colors">
+                  <button type="button" onClick={() => handleInsertEmoji('😊')} className="p-2 text-dark-400 hover:text-white rounded-lg transition-colors touch-manipulation" title="Insert emoji">
                     <Smile className="w-5 h-5" />
                   </button>
-                  <button type="button" className="p-2 text-dark-400 hover:text-white rounded-lg transition-colors">
+                  <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-dark-400 hover:text-white rounded-lg transition-colors touch-manipulation" title="Attach file">
                     <Paperclip className="w-5 h-5" />
                   </button>
+                  <input ref={fileInputRef} type="file" multiple onChange={handleFileChange} className="hidden" accept="image/*,application/pdf,text/plain" />
                 </div>
                 <span className="text-xs text-dark-500">{message.length}/2000</span>
               </div>
             </div>
             
-            <Button type="submit" disabled={!message.trim() || !canSendMessage || isMuted || !isConnected} className="h-12 w-12 !p-0">
+            <Button type="submit" disabled={(!message.trim() && attachments.every((attachment) => attachment.status === 'failed')) || !canSendMessage || isMuted || !isConnected || isUploading} className="h-12 w-full sm:w-12 !p-0">
               <Send className="w-5 h-5" />
             </Button>
           </div>
@@ -535,7 +812,7 @@ const RoomDetail = () => {
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: 320, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
-            className="border-l border-dark-800 bg-dark-900/50 overflow-hidden"
+            className="fixed inset-y-0 right-0 z-30 w-[min(88vw,320px)] border-l border-dark-800 bg-dark-900/95 overflow-hidden backdrop-blur md:static md:z-auto md:w-[320px]"
           >
             <div className="p-4 border-b border-dark-800">
               <div className="flex items-center justify-between">
@@ -818,6 +1095,20 @@ const RoomDetail = () => {
               )}
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showSidebar && (
+          <motion.button
+            type="button"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowSidebar(false)}
+            className="fixed inset-0 z-20 bg-black/30 md:hidden"
+            aria-label="Close participants sidebar"
+          />
         )}
       </AnimatePresence>
     </div>

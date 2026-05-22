@@ -4,6 +4,7 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
@@ -34,6 +35,11 @@ if (!process.env.JWT_SECRET || !process.env.JWT_SECRET.trim()) {
 
 const app = express();
 const server = http.createServer(app);
+const uploadDir = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
 const normalizeOrigin = (origin) => {
   if (!origin || typeof origin !== 'string') return null;
@@ -167,7 +173,7 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // Body parser
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Database connection
@@ -189,6 +195,7 @@ app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/admin', authenticateToken, adminRoutes);
 const publicRoutes = require('./routes/public');
 app.use('/api/public', publicRoutes);
+app.use('/uploads', express.static(uploadDir));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

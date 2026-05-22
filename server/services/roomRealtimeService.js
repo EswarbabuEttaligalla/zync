@@ -104,10 +104,12 @@ const buildRoomState = async ({ room, userId, onlineUsers = [], typingUsers = []
       _id: message._id,
       content: message.content,
       replyTo: message.replyTo,
+      replySnapshot: message.replySnapshot || null,
       type: message.type,
       status: message.status,
       sender: message.sender,
       reactions: message.reactions,
+      attachments: message.attachments || [],
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
       isEdited: message.isEdited,
@@ -129,6 +131,12 @@ const buildRoomState = async ({ room, userId, onlineUsers = [], typingUsers = []
       createdAt: request.createdAt,
     })),
   };
+};
+
+const emitRoomState = async ({ io, room, userId, onlineUsers = [], typingUsers = [], pendingSpeakerRequests = [] }) => {
+  const state = await buildRoomState({ room, userId, onlineUsers, typingUsers, pendingSpeakerRequests });
+  io.to(room.roomId).emit('room:state', state);
+  return state;
 };
 
 const ensureNotification = async ({ recipient, room, actor, type, title, body, data = {} }) => Notification.create({
@@ -153,6 +161,7 @@ module.exports = {
   canModerate,
   canApproveSpeaker,
   buildRoomState,
+  emitRoomState,
   ensureNotification,
   recordActivity,
   createClientMessageId,

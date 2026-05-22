@@ -146,6 +146,7 @@ export const messageAPI = {
   getMessages: (roomId, params) => api.get(`/messages/${roomId}`, { params }),
   searchMessages: (roomId, query) => api.get(`/messages/${roomId}/search`, { params: { query } }),
   getFlaggedMessages: (roomId) => api.get(`/messages/${roomId}/flagged`),
+  uploadAttachment: (data, config = {}) => api.post('/messages/uploads', data, config),
   deleteMessage: (messageId) => api.delete(`/messages/${messageId}`),
   editMessage: (messageId, content) => api.put(`/messages/${messageId}`, { content }),
 };

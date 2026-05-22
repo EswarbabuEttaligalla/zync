@@ -532,6 +532,8 @@ export const useSocketStore = create((set, get) => ({
       status: 'sending',
       pending: true,
       replyTo: options.replyTo || null,
+      replySnapshot: options.replySnapshot || null,
+      attachments: options.attachments || [],
       reactions: [],
     };
 
@@ -548,6 +550,8 @@ export const useSocketStore = create((set, get) => ({
           content,
           type: options.type || 'text',
           replyTo: options.replyTo,
+          replySnapshot: options.replySnapshot,
+          attachments: options.attachments || [],
           clientMessageId,
         }),
         new Promise((resolve) => setTimeout(() => resolve({ ok: false, timeout: true, error: 'Message delivery timed out' }), 12000)),
@@ -559,6 +563,7 @@ export const useSocketStore = create((set, get) => ({
     if (response.ok) {
       set((state) => ({
         messages: syncMessageByClientId(state.messages, clientMessageId, {
+            ...response.message,
           status: response.delivery?.status || 'sent',
           pending: false,
           _id: response.message?._id || response.message?.id || clientMessageId,
@@ -595,12 +600,41 @@ export const useSocketStore = create((set, get) => ({
   deleteMessage: async (messageId, roomId) => {
     const { socket } = get();
     if (!socket) return { ok: false, error: 'Socket not connected' };
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        const currentId = message._id || message.id;
+        if (currentId !== messageId) return message;
+        return { ...message, status: 'deleted', isDeleted: true, deletedAt: new Date().toISOString(), pending: false };
+      }),
+    }));
     return emitWithAck(socket, 'message:delete', { messageId, roomId });
   },
 
   reactToMessage: async (messageId, reaction, roomId) => {
     const { socket } = get();
     if (!socket) return { ok: false, error: 'Socket not connected' };
+    const currentUserId = useAuthStore.getState().user?._id?.toString?.();
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        const currentId = message._id || message.id;
+        if (currentId !== messageId) return message;
+        const reactions = Array.isArray(message.reactions) ? [...message.reactions] : [];
+        const existingIndex = reactions.findIndex((entry) => {
+          const entryUserId = entry.userId || entry.user || entry.user?._id || entry.user?.id;
+          return entryUserId?.toString?.() === currentUserId;
+        });
+
+        if (existingIndex >= 0 && reactions[existingIndex].type === reaction) {
+          reactions.splice(existingIndex, 1);
+        } else if (existingIndex >= 0) {
+          reactions[existingIndex] = { ...reactions[existingIndex], type: reaction };
+        } else {
+          reactions.push({ userId: currentUserId, type: reaction, username: useAuthStore.getState().user?.username, avatar: useAuthStore.getState().user?.profile?.avatar || null });
+        }
+
+        return { ...message, reactions };
+      }),
+    }));
     return emitWithAck(socket, 'message:react', { messageId, reaction, roomId });
   },
 

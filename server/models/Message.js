@@ -34,12 +34,18 @@ const messageSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'pending_review', 'approved', 'blocked', 'modified', 'deleted', 'delivered', 'flagged'],
+    enum: ['pending', 'sending', 'pending_review', 'approved', 'blocked', 'modified', 'deleted', 'delivered', 'sent', 'failed', 'flagged'],
     default: 'pending'
   },
   moderation: {
     analyzed: { type: Boolean, default: false },
     analyzedAt: { type: Date },
+    state: { type: String, default: 'SAFE' },
+    status: { type: String, default: 'approved' },
+    source: { type: String, default: null },
+    reason: { type: String, default: null },
+    pendingReview: { type: Boolean, default: false },
+    aiUnavailable: { type: Boolean, default: false },
     toxicity: {
       score: { type: Number, min: 0, max: 1 },
       categories: [{
@@ -74,6 +80,23 @@ const messageSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Message'
   },
+  replySnapshot: {
+    messageId: { type: String, default: null },
+    senderName: { type: String, default: '' },
+    senderAvatar: { type: String, default: null },
+    content: { type: String, default: '' },
+    createdAt: { type: Date, default: null },
+  },
+  attachments: [{
+    id: { type: String, required: true },
+    name: { type: String, required: true },
+    mimeType: { type: String, required: true },
+    size: { type: Number, required: true },
+    url: { type: String, required: true },
+    previewUrl: { type: String, default: null },
+    storagePath: { type: String, default: null },
+    uploadedAt: { type: Date, default: Date.now },
+  }],
   reactions: [{
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -81,7 +104,7 @@ const messageSchema = new mongoose.Schema({
     },
     type: {
       type: String,
-      enum: ['agree', 'disagree', 'insightful', 'citation-needed']
+      enum: ['agree', 'love', 'laugh', 'fire', 'clap', 'disagree', 'surprised', 'sad', 'angry', 'insightful', 'citation-needed']
     }
   }],
   editHistory: [{
